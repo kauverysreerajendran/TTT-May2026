@@ -440,7 +440,9 @@ def handle_submission(request, action):
     stock.brass_onhold_picking = False
     stock.send_brass_qc = False
 
-    if is_iqf_reentry:
+    if is_iqf_reentry and submission_type != "FULL_ACCEPT":
+        # Only close the IQF re-entry lot when it is split or fully rejected.
+        # FULL_ACCEPT: the same lot continues forward to Brass Audit — must NOT be hidden.
         stock.remove_lot = True
         logger.info(
             f"[submission_service] IQF re-entry lot {lot_id} marked remove_lot=True after {submission_type}"

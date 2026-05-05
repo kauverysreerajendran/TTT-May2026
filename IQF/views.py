@@ -3495,7 +3495,7 @@ def iqf_accept_delink_modal(request):
                             'reasons': _new_rejection_details,
                             'rejected_lot_id': rejected_lot_id,
                         }
-                        IQF_Submitted.objects.create(
+                        _submission = IQF_Submitted.objects.create(
                             lot_id=lot_id,
                             batch_id=ts.batch_id,
                             original_lot_qty=int(ts.total_stock or 0),
@@ -3511,6 +3511,31 @@ def iqf_accept_delink_modal(request):
                             created_by=request.user,
                         )
                         print(f'[DELINK CONFIRM NEW] IQF_Submitted created for parent lot={lot_id}')
+
+                        # Populate IQF_PartialAcceptLot and IQF_PartialRejectLot tracking tables
+                        _parent_batch_id_val = ts.batch_id.batch_id if ts.batch_id else ''
+                        IQF_PartialAcceptLot.objects.create(
+                            new_lot_id=accepted_lot_id,
+                            parent_lot_id=lot_id,
+                            parent_batch_id=_parent_batch_id_val,
+                            parent_submission=_submission,
+                            accepted_qty=accepted_qty,
+                            accept_trays_count=len(acc_trays_for_sub),
+                            trays_snapshot=acc_trays_for_sub,
+                            created_by=request.user,
+                        )
+                        IQF_PartialRejectLot.objects.create(
+                            new_lot_id=rejected_lot_id,
+                            parent_lot_id=lot_id,
+                            parent_batch_id=_parent_batch_id_val,
+                            parent_submission=_submission,
+                            rejected_qty=rejected_qty,
+                            reject_trays_count=len(reject_allocation),
+                            rejection_reasons=_new_rejection_details,
+                            trays_snapshot=reject_allocation,
+                            created_by=request.user,
+                        )
+                        print(f'[DELINK CONFIRM NEW] IQF_PartialAcceptLot + IQF_PartialRejectLot created for parent lot={lot_id}')
 
                         # Mark ALL parent trays as delinked — parent is consumed by child lots
                         IQFTrayId.objects.filter(lot_id=lot_id).update(delink_tray=True)

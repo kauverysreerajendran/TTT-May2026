@@ -28,4 +28,7 @@ urlpatterns = [
     # Barcode scanner
     path('get_lot_id_for_tray/', get_lot_id_for_tray, name='get_lot_id_for_tray'),
 
+    # Jig Loading view icon — lot metadata
+    path('brass_audit_get_accepted_tray_scan_data/', brass_audit_get_accepted_tray_scan_data, name='brass_audit_get_accepted_tray_scan_data'),
+
 ]

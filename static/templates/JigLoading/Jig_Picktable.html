@@ -1335,7 +1335,12 @@ document.addEventListener('DOMContentLoaded', function () {
           const sectionTitle = modal.querySelector('.jig-tray-view-panel__section-title');
           const metaLabel = modal.querySelector('.jig-tray-view-panel__meta-label');
           
-          if (modelNoEl) modelNoEl.textContent = '';
+          // Populate model no + plating stock no from backend response
+          if (modelNoEl) {
+            const modelNo = (meta && meta.model_no) ? meta.model_no : '';
+            const platingStkNo = (meta && meta.plating_stk_no) ? meta.plating_stk_no : '';
+            modelNoEl.textContent = platingStkNo ? `${modelNo} (${platingStkNo})` : modelNo;
+          }
           if (lotQtyEl) lotQtyEl.textContent = lotQtyDisplay;
           if (sectionTitle) sectionTitle.textContent = 'Jig Loading - Tray Scan';
           if (metaLabel) metaLabel.textContent = 'Lot Qty:';

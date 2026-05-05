@@ -3829,22 +3829,6 @@ document.addEventListener('click', function(evt){
     var qty = parseInt(card.getAttribute('data-qty')) || 0;
     var isTopTray = card.getAttribute('data-is-top-tray') === 'true';
     var trayCapacity = parseInt(card.getAttribute('data-tray-capacity')) || 0;
-    
-    // ✅ ERR1 FIX: Enforce reuse limit BEFORE allowing any tap-to-fill
-    var _tapMaxReuse = window._maxReuseLimit || 0;
-    if(_tapMaxReuse > 0){
-      var _tapUsedCount = document.querySelectorAll('.iqf-existing-tray-card.iqf-tray-used').length;
-      if(_tapUsedCount >= _tapMaxReuse){
-        // ✅ ERR2: Show inline error inside modal panel (not Swal toast)
-        var _reuseErrEl = document.getElementById('iqf-reuse-error');
-        if(_reuseErrEl){
-          _reuseErrEl.innerHTML = '<i class="fa fa-exclamation-triangle"></i> Exceeded reusable tray limit (' + _tapMaxReuse + '). Scan a new tray for remaining accept slots.';
-          _reuseErrEl.style.display = 'block';
-          setTimeout(function(){ _reuseErrEl.style.display = 'none'; }, 3000);
-        }
-        return;
-      }
-    }
 
     // Check if already used
     if(card.classList.contains('iqf-tray-used')){
@@ -3867,6 +3851,7 @@ document.addEventListener('click', function(evt){
     
     if(!targetInput){
       // ERR1+ERR4 FIX: Accept full — redirect tap to next empty reject slot
+      // ✅ NO REUSE LIMIT CHECK FOR REJECT — reject trays don't have reusable count restriction
       var _rejInputs = document.querySelectorAll('#iqf-reject-tbody .rej-scan-input');
       var _targetRejInput = null;
       for(var _ri = 0; _ri < _rejInputs.length; _ri++){
@@ -3884,6 +3869,22 @@ document.addEventListener('click', function(evt){
         Swal.fire({ icon: 'info', title: 'All Slots Filled', text: 'All accept and reject tray slots are already filled.', toast: true, position: 'top-end', timer: 2000, showConfirmButton: false });
       }
       return;
+    }
+    
+    // ✅ SCOPED FIX: Enforce reuse limit ONLY when filling Accept slot (not Reject)
+    var _tapMaxReuse = window._maxReuseLimit || 0;
+    if(_tapMaxReuse > 0){
+      var _tapUsedCount = document.querySelectorAll('.iqf-existing-tray-card.iqf-tray-used').length;
+      if(_tapUsedCount >= _tapMaxReuse){
+        // ✅ ERR2: Show inline error inside modal panel (not Swal toast)
+        var _reuseErrEl = document.getElementById('iqf-reuse-error');
+        if(_reuseErrEl){
+          _reuseErrEl.innerHTML = '<i class="fa fa-exclamation-triangle"></i> Exceeded reusable tray limit (' + _tapMaxReuse + '). Scan a new tray for remaining accept slots.';
+          _reuseErrEl.style.display = 'block';
+          setTimeout(function(){ _reuseErrEl.style.display = 'none'; }, 3000);
+        }
+        return;
+      }
     }
     
     // Auto-fill the slot

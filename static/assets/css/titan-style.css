@@ -4641,6 +4641,7 @@ background: linear-gradient(135deg, #e0f7fa, #e8f5e9) !important;
 .jig-tray-view-panel__body {
   flex: 1;
   overflow-y: auto;
+  max-height: calc(100vh - 180px);
   padding: 12px 20px 20px 20px;
   scrollbar-width: thin;
 }

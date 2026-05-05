@@ -823,6 +823,21 @@ def _resolve_lot_trays_audit(lot_id):
             for t in accepted
         ]
 
+    # Step 4: IQFTrayId fallback — for IQF-accepted child lots that have no BrassAuditTrayId
+    if not tray_data:
+        source = "IQFTrayId"
+        iqf_trays = IQFTrayId.objects.filter(lot_id=lot_id, delink_tray=False).order_by('-top_tray', 'tray_id')
+        tray_data = [
+            {
+                "tray_id": t.tray_id,
+                "qty": int(t.remaining_qty or 0) if (t.remaining_qty or 0) > 0 else int(t.tray_quantity or 0),
+                "is_rejected": bool(t.rejected_tray),
+                "is_top": bool(t.top_tray),
+                "is_delinked": False,
+            }
+            for t in iqf_trays
+        ]
+
     total_qty = sum(t['qty'] for t in tray_data)
 
     # Compute status for each tray (backend-driven)
@@ -1441,7 +1456,15 @@ def _handle_audit_submission(request, action):
                     rejected_trays.append({"tray_id": tid, "qty": slot_qty, "is_top": False})
                     continue
                 return JsonResponse({"success": False, "error": f"Tray {tid} not found in lot"}, status=400)
-            tray_entry = {"tray_id": tid, "qty": tray_match["qty"], "is_top": is_top}
+            # ✅ FIX: Honour UI-provided qty for REJECT slots (top tray qty is updated by UI
+            # when reject qty < parent tray qty). Without this, the parent's original qty
+            # is stored for the top reject tray, causing partial_reject_data to show stale qty.
+            if ta_action == "REJECT":
+                _ui_qty = ta.get("qty")
+                _entry_qty = int(_ui_qty) if _ui_qty is not None and int(_ui_qty) > 0 else tray_match["qty"]
+                tray_entry = {"tray_id": tid, "qty": _entry_qty, "is_top": is_top}
+            else:
+                tray_entry = {"tray_id": tid, "qty": tray_match["qty"], "is_top": is_top}
             if ta_action == "ACCEPT":
                 accepted_trays.append(tray_entry)
             elif ta_action == "REJECT":
@@ -1557,7 +1580,7 @@ def _handle_audit_submission(request, action):
         accept_lot_id = f"LID{now.strftime('%Y%m%d%H%M%S')}{str(now.microsecond).zfill(6)}{uuid.uuid4().hex[:4]}"
         reject_lot_id = f"LID{now.strftime('%Y%m%d%H%M%S')}{str(now.microsecond).zfill(6)}{uuid.uuid4().hex[:4]}"
 
-        t_label = "partial: accept child -> Jig Loading | reject child -> Brass QC"
+        t_label = "partial: accept child -> Jig Loading | reject child -> IQF"
         submission.transition_accept_lot_id = accept_lot_id
         submission.transition_reject_lot_id = reject_lot_id
         submission.transition_label = t_label
@@ -1620,33 +1643,31 @@ def _handle_audit_submission(request, action):
             rejected_child.id = None
             rejected_child.lot_id = reject_lot_id
             rejected_child.total_stock = rejected_qty
-            # ✅ FIX: Set total_IP_accpeted_quantity to rejected_qty so Brass QC pick table
-            # displays correct qty (17) instead of inherited parent qty (43).
+            # ✅ FIX: Set total_IP_accpeted_quantity to rejected_qty so IQF pick table
+            # displays correct qty instead of inherited parent qty.
             rejected_child.total_IP_accpeted_quantity = rejected_qty
             rejected_child.brass_audit_physical_qty = 0
             rejected_child.brass_audit_accepted_qty = 0
             # ✅ FIX: Do NOT set brass_qc_* flags on child lots
             # This child belongs to IQF stage, not Brass QC.
-            # Setting brass_qc_accptance=True causes it to appear in Brass QC Completed table (wrong stage).
+            # Setting brass_qc_accptance=True would cause it to appear in Brass QC Completed table (wrong).
             rejected_child.brass_qc_accepted_qty = 0
             rejected_child.brass_physical_qty = 0
             rejected_child.brass_qc_accptance = False
             rejected_child.brass_qc_accepted_qty_verified = False
             rejected_child.brass_qc_rejection = False
             rejected_child.brass_qc_few_cases_accptance = False
-            rejected_child.iqf_accepted_qty = rejected_qty
-            # ✅ FIX: Route reject child to BRASS QC (not IQF)
-            # User requirement: Brass Audit partial reject → re-inspection in Brass QC
-            # The child lot is independent and travels back to Brass QC for reprocessing.
+            # ✅ FIX: Route reject child to IQF (Brass Audit partial reject hierarchy)
+            # Brass Audit - Partial Reject → reject portion goes to IQF
             rejected_child.brass_audit_rejection = True
             rejected_child.brass_audit_accptance = False
             rejected_child.brass_audit_few_cases_accptance = False
             rejected_child.last_process_module = 'Brass Audit'
-            rejected_child.next_process_module = 'Brass QC'
-            rejected_child.send_brass_audit_to_iqf = False
-            rejected_child.send_brass_audit_to_qc = True
-            # Reset IQF flags (child does NOT go to IQF)
-            rejected_child.iqf_accepted_qty = 0
+            rejected_child.next_process_module = 'IQF'
+            rejected_child.send_brass_audit_to_iqf = True
+            rejected_child.send_brass_audit_to_qc = False
+            # Set IQF qty — the rejected qty flows into IQF for reprocessing
+            rejected_child.iqf_accepted_qty = rejected_qty
             rejected_child.iqf_rejection = False
             rejected_child.iqf_acceptance = False
             rejected_child.iqf_few_cases_acceptance = False
@@ -1660,35 +1681,21 @@ def _handle_audit_submission(request, action):
             rejected_child.save()
             rejected_child.location.set(stock.location.all())
 
-            BrassTrayId.objects.bulk_create([
-                BrassTrayId(
+            # ✅ FIX: Reject child goes to IQF — create IQFTrayId records.
+            # IQF reads tray data from IQFTrayId via its tray resolver.
+            from IQF.models import IQFTrayId
+            IQFTrayId.objects.bulk_create([
+                IQFTrayId(
                     lot_id=reject_lot_id,
                     tray_id=t["tray_id"],
                     tray_quantity=int(t["qty"]),
                     batch_id=stock.batch_id,
                     user=request.user,
                     top_tray=bool(t.get("is_top", False)),
-                    rejected_tray=True,
-                    delink_tray=False,
-                    new_tray=False
-                )
-                for t in rejected_trays if int(t.get("qty", 0)) > 0
-            ])
-
-            # ✅ FIX: Reject child goes to Brass QC (not IQF), so create BrassAuditTrayId
-            # records (Brass QC reads tray data from BrassAuditTrayId via tray resolver).
-            # Do NOT create IQFTrayId records — child does not belong to IQF stage.
-            BrassAuditTrayId.objects.bulk_create([
-                BrassAuditTrayId(
-                    lot_id=reject_lot_id,
-                    tray_id=t["tray_id"],
-                    tray_quantity=int(t["qty"]),
-                    batch_id=stock.batch_id,
-                    user=request.user,
-                    top_tray=bool(t.get("is_top", False)),
-                    rejected_tray=True,
+                    rejected_tray=False,
                     delink_tray=False,
                     new_tray=False,
+                    remaining_qty=int(t["qty"]),
                 )
                 for t in rejected_trays if int(t.get("qty", 0)) > 0
             ])
@@ -1837,7 +1844,7 @@ def _handle_audit_submission(request, action):
         print(f"\n{'='*60}")
         print(f"[BRASS AUDIT PARTIAL SPLIT] Parent Lot: {lot_id}")
         print(f"  Accept Lot ID: {accept_lot_id} → Jig Loading (qty={accepted_qty})")
-        print(f"  Reject Lot ID: {reject_lot_id} → Brass QC (qty={rejected_qty})")
+        print(f"  Reject Lot ID: {reject_lot_id} → IQF (qty={rejected_qty})")
         print(f"  Accept Trays: {_accept_tray_str}")
         print(f"  Reject Trays: {_reject_tray_str}")
         print(f"{'='*60}\n")
@@ -2206,7 +2213,7 @@ def get_brass_audit_tray_details_for_modal(request):
                     total_accepted_qty += tray.tray_quantity or 0
 
             if not trays.exists():
-                # Final fallback: TrayId
+                # Fallback 1: TrayId
                 tray_objs = TrayId.objects.filter(lot_id=lot_id)
                 brass_trays = {t.tray_id: t for t in BrassTrayId.objects.filter(lot_id=lot_id)}
                 for tray in tray_objs:
@@ -2219,6 +2226,31 @@ def get_brass_audit_tray_details_for_modal(request):
                         'top_tray': top_tray,
                     })
                     total_accepted_qty += qty
+
+                # Fallback 2: IQFTrayId — IQF-accepted child lots store trays here
+                if not tray_objs.exists():
+                    iqf_trays = IQFTrayId.objects.filter(lot_id=lot_id, delink_tray=False, rejected_tray=False).order_by('-top_tray', 'tray_id')
+                    for tray in iqf_trays:
+                        qty = int(tray.remaining_qty or 0) if (tray.remaining_qty or 0) > 0 else int(tray.tray_quantity or 0)
+                        accepted_trays.append({
+                            'tray_id': tray.tray_id,
+                            'tray_quantity': qty,
+                            'top_tray': bool(tray.top_tray),
+                        })
+                        total_accepted_qty += qty
+
+                    # Fallback 3: IQF_PartialAcceptLot snapshot — guaranteed to be correct
+                    if not iqf_trays.exists():
+                        pal = IQF_PartialAcceptLot.objects.filter(new_lot_id=lot_id).first()
+                        if pal and pal.trays_snapshot:
+                            for t in pal.trays_snapshot:
+                                qty = int(t.get('qty', 0))
+                                accepted_trays.append({
+                                    'tray_id': t.get('tray_id', ''),
+                                    'tray_quantity': qty,
+                                    'top_tray': bool(t.get('top_tray', False)),
+                                })
+                                total_accepted_qty += qty
 
         # Sort: top tray first, then by qty
         accepted_trays.sort(key=lambda x: (not x.get('top_tray', False), x.get('tray_quantity', 0)))
@@ -2333,6 +2365,65 @@ class RejectTableTrayIdListAPIView(APIView):
             logger.error(f"[RejectTable] Error fetching trays for lot {lot_id}: {e}")
             traceback.print_exc()
             return Response({"success": False, "error": str(e)}, status=500)
+
+
+# ═══════════════════════════════════════════════════════════════
+# Accepted Tray Scan Data API — for Jig Loading view icon
+# ═══════════════════════════════════════════════════════════════
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def brass_audit_get_accepted_tray_scan_data(request):
+    """Return lot metadata for the Jig Loading view icon panel.
+
+    Returns lot_qty, model_no, plating_stk_no, tray_capacity and available_qty
+    so the right-side slide panel can display correct header info.
+    """
+    lot_id = request.GET.get('lot_id', '').strip()
+    if not lot_id:
+        return JsonResponse({'success': False, 'error': 'Missing lot_id'}, status=400)
+
+    try:
+        stock = TotalStockModel.objects.select_related(
+            'model_stock_no', 'batch_id'
+        ).filter(lot_id=lot_id).first()
+
+        if not stock:
+            return JsonResponse({'success': False, 'error': 'Stock not found'}, status=404)
+
+        model_no = stock.model_stock_no.model_no if stock.model_stock_no else ''
+
+        # plating_stk_no lives on ModelMasterCreation (batch) first, then ModelMaster
+        plating_stk_no = ''
+        if stock.batch_id and stock.batch_id.plating_stk_no:
+            plating_stk_no = stock.batch_id.plating_stk_no
+        elif stock.model_stock_no and stock.model_stock_no.plating_stk_no:
+            plating_stk_no = stock.model_stock_no.plating_stk_no
+
+        tray_capacity = (
+            stock.batch_id.tray_capacity
+            if stock.batch_id and stock.batch_id.tray_capacity
+            else 10
+        )
+
+        brass_audit_physical_qty = stock.brass_audit_physical_qty or 0
+        brass_audit_accepted_qty = stock.brass_audit_accepted_qty or 0
+
+        # Prefer the accepted qty; fall back to physical qty if acceptance not yet recorded
+        available_qty = brass_audit_accepted_qty if brass_audit_accepted_qty > 0 else brass_audit_physical_qty
+
+        return JsonResponse({
+            'success': True,
+            'lot_qty': brass_audit_physical_qty,
+            'available_qty': available_qty,
+            'brass_audit_physical_qty': brass_audit_physical_qty,
+            'brass_audit_accepted_qty': brass_audit_accepted_qty,
+            'model_no': model_no,
+            'plating_stk_no': plating_stk_no,
+            'tray_capacity': tray_capacity,
+        })
+    except Exception as e:
+        logger.error(f"[brass_audit_get_accepted_tray_scan_data] Error: {e}")
+        return JsonResponse({'success': False, 'error': str(e)}, status=500)
 
 
 # ═══════════════════════════════════════════════════════════════

@@ -60,6 +60,14 @@ def clear_database():
     BrassAuditTrayId.objects.all().delete()
     Brass_Audit_Accepted_TrayID_Store.objects.all().delete()
     Brass_Audit_Rejection_ReasonStore.objects.all().delete()
+    Brass_Audit_Draft_Store.objects.all().delete()
+    Brass_Audit_TopTray_Draft_Store.objects.all().delete()
+    Brass_Audit_Rejected_TrayScan.objects.all().delete()
+    Brass_Audit_Accepted_TrayScan.objects.all().delete()
+    Brass_Audit_RawSubmission.objects.all().delete()
+    Brass_Audit_Submission.objects.all().delete()
+    BrassAudit_PartialAcceptLot.objects.all().delete()
+    BrassAudit_PartialRejectLot.objects.all().delete()
 
     # -------------------------------
     # INPUT SCREENING
