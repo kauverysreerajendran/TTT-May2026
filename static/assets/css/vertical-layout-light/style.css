@@ -31103,8 +31103,8 @@ dl li {
 }
 .table td img,
 .jsgrid .jsgrid-table td img {
-  width: 36px;
-  height: 36px;
+  width: 20px;
+  height: 20px;
   border-radius: 100%;
 }
 .table td .badge,

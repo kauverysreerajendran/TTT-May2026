@@ -46,7 +46,7 @@ def _nq_tray_capacity(tray_type_name):
     if not tray_type_name:
         return 0
     name = tray_type_name.strip().lower()
-    if name.startswith('nr') or name.startswith('nb') or name in ['normal', 'normal tray']:
+    if name.startswith('nr') or name.startswith('nb') or name.startswith('nd') or name in ['normal', 'normal tray']:
         return 20
     if name.startswith('jb') or 'jumbo' in name:
         return 12
@@ -134,12 +134,14 @@ class NQ_Zone_PickTableView(APIView):
                 &
                 # Exclude few cases acceptance with no hold
                 ~Q(nq_qc_few_cases_accptance=True, nq_onhold_picking=False)
-                &
+            )
+            &
+            (
                 # Must be coming from jig unload (basic requirement)
                 Q(total_case_qty__gt=0)
+                | Q(send_to_nickel_brass=True)  # Explicitly sent to nickel IP
+                | Q(rejected_nickle_ip_stock=True, nq_onhold_picking=True)  # Rejected but on hold
             )
-            | Q(send_to_nickel_brass=True)  # Explicitly sent to nickel IP
-            | Q(rejected_nickle_ip_stock=True, nq_onhold_picking=True)  # Rejected but on hold
         ).order_by("-created_at", "-lot_id")
         print("All lot_ids in queryset:", list(queryset.values_list("lot_id", flat=True)))
         # Pagination

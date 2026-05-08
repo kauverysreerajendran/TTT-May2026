@@ -1023,6 +1023,7 @@
                     <input type="text" id="globalScanInput" 
                       placeholder="Scan or paste Tray ID..."
                       autocomplete="off"
+                      maxlength="9"
                             style="width:100%;padding:10px 12px;border:1.5px solid #b3e5e6;border-radius:6px;
                                    font-size:13px;margin-top:8px;transition:border-color 0.2s;"/>
                      <div id="scanResult" style="margin-top:10px;font-size:12px;"></div>
@@ -1909,7 +1910,8 @@
       </li>
       {% endif %}
       <!-- Spider Spindle Menu -->
-      {% if is_admin or 'Spider Spindle Z1 Pick Table' in allowed_modules or 'Spider Spindle Z2 Pick Table' in allowed_modules %}
+      {% if is_admin or 'Spider Spindle Z1 Pick Table' in allowed_modules or 'Spider Spindle Z1 Completed Table' in allowed_modules or 'Spider Spindle Z2 Pick Table' in allowed_modules or 'Spider Spindle Z2 Completed Table' in allowed_modules %}
+      {% if is_admin or 'Spider Spindle Z1 Pick Table' in allowed_modules or 'Spider Spindle Z1 Completed Table' in allowed_modules %}
       <li class="nav-item">
          <a class="nav-link" data-bs-toggle="collapse" href="#spiderSpindleZ1Menu" aria-expanded="false" aria-controls="spiderSpindleZ1Menu">
          <i class="ti-hummer menu-icon"></i>
@@ -1918,15 +1920,21 @@
          </a>
          <div class="collapse" id="spiderSpindleZ1Menu">
             <ul class="nav flex-column sub-menu">
+              {% if is_admin or 'Spider Spindle Z1 Pick Table' in allowed_modules %}
                <li class="nav-item">
                   <a class="nav-link" href="{% url 'ss_z1_pick_table' %}">Pick Table</a>
                </li>
+              {% endif %}
+              {% if is_admin or 'Spider Spindle Z1 Completed Table' in allowed_modules %}
                <li class="nav-item">
                   <a class="nav-link" href="{% url 'ss_z1_completed' %}">Completed Table</a>
                </li>
+              {% endif %}
             </ul>
          </div>
       </li>
+        {% endif %}
+        {% if is_admin or 'Spider Spindle Z2 Pick Table' in allowed_modules or 'Spider Spindle Z2 Completed Table' in allowed_modules %}
       <li class="nav-item">
          <a class="nav-link" data-bs-toggle="collapse" href="#spiderSpindleZ2Menu" aria-expanded="false" aria-controls="spiderSpindleZ2Menu">
          <i class="ti-hummer menu-icon"></i>
@@ -1935,15 +1943,20 @@
          </a>
          <div class="collapse" id="spiderSpindleZ2Menu">
             <ul class="nav flex-column sub-menu">
+              {% if is_admin or 'Spider Spindle Z2 Pick Table' in allowed_modules %}
                <li class="nav-item">
                   <a class="nav-link" href="{% url 'ss_z2_pick_table' %}">Pick Table</a>
                </li>
+              {% endif %}
+              {% if is_admin or 'Spider Spindle Z2 Completed Table' in allowed_modules %}
                <li class="nav-item">
                   <a class="nav-link" href="{% url 'ss_z2_completed' %}">Completed Table</a>
                </li>
+              {% endif %}
             </ul>
          </div>
       </li>
+        {% endif %}
       {% endif %}
    </ul>
 </nav>
@@ -2885,6 +2898,7 @@
 
   const SCAN_TABLE_SELECTOR = '#order-listing';
   const AUTO_SCAN_LENGTH = 9;
+  const MAX_TRAY_ID_LENGTH = 9;
   const MAX_PAGINATION_SCAN_PAGES = 300;
 
   let scanActive = false;
@@ -2895,6 +2909,7 @@
   let lastSubmittedTrayId = '';
   let lastSubmittedAt = 0;
   let priorityMoveState = null;
+  let autoOpeningDraftModal = false;
 
   function logScan(tag, payload) {
     try {
@@ -2935,15 +2950,19 @@
     }, 30);
   }
 
-  function normalizeTrayId(rawValue) {
+  function normalizeScanToken(rawValue) {
     return String(rawValue || '')
       .toUpperCase()
       .replace(/[\s\r\n]+/g, '')
       .trim();
   }
 
+  function normalizeTrayId(rawValue) {
+    return normalizeScanToken(rawValue).slice(0, MAX_TRAY_ID_LENGTH);
+  }
+
   function normalizeIdentifier(rawValue) {
-    return normalizeTrayId(rawValue);
+    return normalizeScanToken(rawValue);
   }
 
   function normalizePath(pathValue) {
@@ -2988,9 +3007,9 @@
     if (typeof window._gkbClearPending === 'function') {
       window._gkbClearPending();
     }
-    document.querySelectorAll('tr.gs-active-scan, tr.gs-hi, tr.gkb-row-focus, tr.dp-row-action-highlight')
+    document.querySelectorAll('tr.gs-active-scan, tr.gs-hi, tr.gkb-row-focus, tr.dp-row-action-highlight, tr.highlighted-tray-scan')
       .forEach(function(row) {
-        row.classList.remove('gs-active-scan', 'gs-hi', 'gkb-row-focus', 'dp-row-action-highlight');
+        row.classList.remove('gs-active-scan', 'gs-hi', 'gkb-row-focus', 'dp-row-action-highlight', 'highlighted-tray-scan');
         row.removeAttribute('data-global-scan-active');
       });
   }
@@ -3008,7 +3027,7 @@
     sessionStorage.removeItem('globalScanLotId');
     if (scanResult) scanResult.innerHTML = '';
     if (!settings.keepInput) scanInput.value = '';
-    if (!settings.keepMessage) setScanMessage('Scan or paste Tray ID', '#028084');
+    if (!settings.keepMessage) setScanMessage('Scan or Type Tray ID', '#028084');
   }
 
   function openGlobalScanModal() {
@@ -3035,6 +3054,13 @@
   }
 
   function bindGlobalScanEvents() {
+    document.addEventListener('keydown', function(event) {
+      if (event.key !== 'F2' && event.keyCode !== 113) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      openGlobalScanModal();
+    }, true);
+
     scanBtn.addEventListener('click', function(event) {
       event.preventDefault();
       event.stopPropagation();
@@ -3050,6 +3076,7 @@
     }
 
     document.addEventListener('click', function(event) {
+      if (autoOpeningDraftModal) return;
       if (scanActive && !scanStatus.contains(event.target) && !scanBtn.contains(event.target)) {
         closeGlobalScanModal();
       }
@@ -3197,9 +3224,16 @@
   }
 
   function buildLookupContext(trayId, responseData) {
-    const identifiers = [
+    const trayIdentifiers = [
       trayId,
-      responseData && responseData.tray_id,
+      responseData && responseData.tray_id
+    ]
+      .map(normalizeTrayId)
+      .filter(function(value, index, values) {
+        return value && value.length >= 4 && values.indexOf(value) === index;
+      });
+
+    const rowIdentifiers = [
       responseData && responseData.lot_id,
       responseData && responseData.batch_id,
       responseData && responseData.stock_lot_id
@@ -3209,8 +3243,15 @@
         return value && value.length >= 4 && values.indexOf(value) === index;
       });
 
+    const identifiers = trayIdentifiers.concat(rowIdentifiers)
+      .filter(function(value, index, values) {
+        return value && values.indexOf(value) === index;
+      });
+
     return {
       trayId: trayId,
+      trayIdentifiers: trayIdentifiers,
+      rowIdentifiers: rowIdentifiers,
       identifiers: identifiers,
       responseData: responseData || {}
     };
@@ -3261,6 +3302,11 @@
   function rowMatchesContext(row, context) {
     if (!row || !context || !context.identifiers || !context.identifiers.length) return false;
     const tokens = collectRowTokens(row);
+    if (context.rowIdentifiers && context.rowIdentifiers.length) {
+      return context.rowIdentifiers.some(function(identifier) {
+        return tokens.has(identifier);
+      });
+    }
     return context.identifiers.some(function(identifier) {
       return tokens.has(identifier);
     });
@@ -3541,6 +3587,7 @@
     if (typeof window._gkbHighlightRow === 'function') {
       window._gkbHighlightRow(row);
     } else {
+      clearScanHighlights();
       row.classList.add('gkb-row-focus', 'dp-row-action-highlight');
     }
     row.classList.add('gs-active-scan');
@@ -3550,10 +3597,119 @@
     });
   }
 
+  function truthyDraftValue(value) {
+    const normalized = String(value || '').trim().toLowerCase();
+    return normalized === 'true' || normalized === '1' || normalized === 'yes' || normalized === 'draft' || normalized === 'drafted';
+  }
+
+  function hasDraftFlag(element) {
+    if (!element) return false;
+    const explicitAttrs = ['data-draft-saved', 'data-draft-status', 'data-is-draft', 'data-lot-status'];
+    for (let index = 0; index < explicitAttrs.length; index += 1) {
+      const attrName = explicitAttrs[index];
+      if (element.hasAttribute(attrName) && truthyDraftValue(element.getAttribute(attrName))) return true;
+    }
+    if (element.dataset) {
+      const keys = Object.keys(element.dataset);
+      for (let index = 0; index < keys.length; index += 1) {
+        const key = keys[index];
+        if ((/draft/i.test(key) || key === 'lotStatus') && truthyDraftValue(element.dataset[key])) return true;
+      }
+    }
+    return false;
+  }
+
+  function isDraftRow(row) {
+    if (!row) return false;
+    if (hasDraftFlag(row)) return true;
+    const flagged = row.querySelectorAll('[data-draft-saved], [data-draft-status], [data-is-draft], [data-lot-status]');
+    for (let index = 0; index < flagged.length; index += 1) {
+      if (hasDraftFlag(flagged[index])) return true;
+    }
+    const titled = row.querySelectorAll('[title], [data-bs-original-title]');
+    for (let index = 0; index < titled.length; index += 1) {
+      const title = (titled[index].getAttribute('title') || '') + ' ' + (titled[index].getAttribute('data-bs-original-title') || '');
+      if (/\bdrafted?\b/i.test(title)) return true;
+    }
+    return /\bdrafted?\b/i.test(row.textContent || '');
+  }
+
+  function isVisibleTrigger(element) {
+    if (!element || element.disabled || element.getAttribute('aria-disabled') === 'true') return false;
+    if (element.classList && element.classList.contains('disabled')) return false;
+    const style = window.getComputedStyle(element);
+    return element.offsetParent !== null && style.visibility !== 'hidden' && style.display !== 'none' && style.pointerEvents !== 'none';
+  }
+
+  function findDraftModalTrigger(row) {
+    const selectors = [
+      '.tray-scan-btn:not(.disabled):not([disabled])',
+      '.open-jig-modal-btn:not(.disabled):not([disabled])',
+      '.btn-reject-is.tray-scan-btn:not(.disabled):not([disabled])',
+      '.draft-resume-btn:not(.disabled):not([disabled])',
+      '.tray-scan-btn-Jig:not(.disabled):not([disabled])',
+      '.jig-view-btn:not(.disabled):not([disabled])',
+      '.view-icon-btn:not(.disabled):not([disabled])',
+      '.bq-view-btn:not(.disabled):not([disabled])',
+      '.ba-view-btn:not(.disabled):not([disabled])',
+      '.remarks-modal-trigger:not(.disabled):not([disabled])',
+      '.z1-unload-link:not(.disabled):not([disabled])',
+      '.z1-unload-btn:not(.disabled):not([disabled])',
+      '.jig-unload-btn:not(.disabled):not([disabled])',
+      '.btn-add-spider:not(.disabled):not([disabled])',
+      '.spider-add-btn:not(.disabled):not([disabled])',
+      '.iqf-audit-btn:not(.disabled):not([disabled])',
+      '.audit-action-btn:not(.disabled):not([disabled])',
+      '.ip-inspection-btn:not(.disabled):not([disabled])',
+      '.inspection-action-btn:not(.disabled):not([disabled])'
+    ];
+    for (let index = 0; index < selectors.length; index += 1) {
+      const trigger = row.querySelector(selectors[index]);
+      if (isVisibleTrigger(trigger)) return trigger;
+    }
+    return null;
+  }
+
+  function openDraftRowModal(row, responseData, trayId) {
+    if (!isDraftRow(row)) return false;
+    const trigger = findDraftModalTrigger(row);
+    if (!trigger) {
+      logScan('[SCAN_DRAFT_MODAL]', {
+        tray_id: trayId,
+        module: responseData && responseData.module,
+        opened: false,
+        reason: 'no_trigger'
+      });
+      return false;
+    }
+    window.setTimeout(function() {
+      if (!document.body.contains(trigger) || !isVisibleTrigger(trigger)) return;
+      autoOpeningDraftModal = true;
+      try {
+        if (typeof window._gkbHighlightRow === 'function') {
+          window._gkbHighlightRow(row);
+        }
+        trigger.click();
+        logScan('[SCAN_DRAFT_MODAL]', {
+          tray_id: trayId,
+          module: responseData && responseData.module,
+          opened: true,
+          trigger: trigger.className || trigger.tagName
+        });
+      } finally {
+        window.setTimeout(function() {
+          autoOpeningDraftModal = false;
+        }, 250);
+      }
+    }, 260);
+    return true;
+  }
+
   function handleTrayFound(match, responseData, trayId) {
     const row = match.row;
     moveHighlightedRowToTop(row);
     applyFoundHighlight(row);
+    openDraftRowModal(row, responseData, trayId);
     setInfo('OK', trayId + ' Exists', '#28a745');
     setScanMessage('Exists', '#28a745');
     if (scanResult) {
@@ -4022,10 +4178,18 @@
     }
   }
 
+  function _clearRowHighlights(exceptRow) {
+    document.querySelectorAll('tr.gkb-row-focus, tr.dp-row-action-highlight, tr.gs-active-scan, tr.gs-hi, tr.highlighted-tray-scan')
+      .forEach(function(row) {
+        if (exceptRow && row === exceptRow) return;
+        row.classList.remove('gkb-row-focus', 'dp-row-action-highlight', 'gs-active-scan', 'gs-hi', 'highlighted-tray-scan');
+        row.removeAttribute('data-global-scan-active');
+      });
+  }
+
   function _highlightRow(row) {
-    if (_pendingRow && _pendingRow !== row) {
-      _pendingRow.classList.remove('gkb-row-focus', 'dp-row-action-highlight');
-    }
+    if (!row) return;
+    _clearRowHighlights(row);
     _pendingRow = row;
     row.classList.add('gkb-row-focus', 'dp-row-action-highlight');
     _scrollRowIntoView(row);
@@ -4033,11 +4197,9 @@
   }
 
   function _clearPending() {
-    if (_pendingRow) {
-      _pendingRow.classList.remove('gkb-row-focus', 'dp-row-action-highlight');
-      _pendingRow = null;
-      _saveRowState(null);  // ← Clear sessionStorage
-    }
+    _clearRowHighlights(null);
+    _pendingRow = null;
+    _saveRowState(null);  // ← Clear sessionStorage
     _pendingEl    = null;
     _lastSelector = null;
   }
@@ -4056,6 +4218,35 @@
       _highlightRow(row);  // This now saves to sessionStorage
     }
   }
+
+  var _ROW_ACTION_SELECTOR = [
+    '.btn-accept-is', '.btn-reject-is', '.tray-scan-btn', '.tray-scan-btn-Jig',
+    '.jig-view-btn', '.view-icon-btn', '.bq-view-btn', '.ba-view-btn',
+    '.delete-batch-btn', '.draft-resume-btn', '.open-jig-modal-btn',
+    '.z1-unload-link', '.z1-unload-btn', '.jig-unload-btn',
+    '.btn-add-spider', '.spider-add-btn', '.iqf-audit-btn', '.audit-action-btn',
+    '.ip-inspection-btn', '.inspection-action-btn', '.remarks-modal-trigger'
+  ].join(', ');
+
+  function _rowForEventTarget(target) {
+    if (!target || !target.closest) return null;
+    var trigger = target.closest(_ROW_ACTION_SELECTOR);
+    var row = (trigger || target).closest('tbody tr');
+    if (!row) return null;
+    if (row.closest('.modal, .swal2-container, .modal-overlay, .overlay-modal, [role="dialog"]')) return null;
+    if (getComputedStyle(row).display === 'none') return null;
+    return row;
+  }
+
+  document.addEventListener('click', function(event) {
+    var row = _rowForEventTarget(event.target);
+    if (!row) return;
+    _highlightRow(row);
+    var trigger = event.target.closest ? event.target.closest(_ROW_ACTION_SELECTOR) : null;
+    if (trigger && _visible(trigger)) {
+      _pendingEl = trigger;
+    }
+  }, true);
 
   // Find first visible row containing an element matching selector
   function _findRowWithEl(selector) {

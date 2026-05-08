@@ -626,7 +626,7 @@ box-shadow: 2px 0 8px rgba(0,0,0,0.04);
       <div class="card">
         <div class="card-body" style="padding-bottom:12px;">
           <div class="mb-4" style="position: relative;">
-            <h5 class="text-left mt-0 mb-0 d-inline-block" style="font-weight:700;">Nickel Audit Pick Table - Zone I
+            <h5 class="text-left mt-0 mb-0 d-inline-block" style="font-weight:700;">Nickel Audit Pick Table - Zone II
               <button type="button" class="btn btn-primary btn-sm ms-3" id="scanButton"
                       style="background-color: #028084; border-color: #028084; font-weight: 600; vertical-align: middle;">
                 <i class="fa fa-qrcode" style="margin-right: 6px;"></i>
@@ -1582,7 +1582,8 @@ document.addEventListener("DOMContentLoaded", function() {
       lotId: '', platingStk: '', totalQty: 0, trayCapacity: 20, trayType: '',
       rejPrefix: 'NB', rejCap: 16,
       reasons: [], origTrays: [], rejectSlots: [], acceptSlots: [],
-      reuseTrays: [], allocDone: false,
+      reuseTrays: [], allocDone: false, acceptAutoTrays: [], autoDelinkIds: [],
+      pendingRestore: null,
     };
 
     function closeModal() {
@@ -1615,13 +1616,15 @@ document.addEventListener("DOMContentLoaded", function() {
       errDiv.textContent = '';
       allocSection.style.display = 'none';
       state.allocDone = false;
+      state.pendingRestore = null;
       reasonsGrid.innerHTML = '<span style="color:#888;font-size:13px;">Loading...</span>';
       overlay.style.display = 'flex';
       Promise.all([
         post(API_BASE + 'action/', { action: 'GET_REASONS' }),
         post(API_BASE + 'action/', { action: 'GET_TRAYS', lot_id: state.lotId }),
+        post(API_BASE + 'action/', { action: 'GET_DRAFT', lot_id: state.lotId }),
       ]).then(function (results) {
-        var rData = results[0], tData = results[1];
+        var rData = results[0], tData = results[1], draftRes = results[2];
         if (!rData.success || !tData.success) {
           reasonsGrid.innerHTML = '<span style="color:red;">Failed to load data</span>';
           return;
@@ -1637,6 +1640,27 @@ document.addEventListener("DOMContentLoaded", function() {
         totalQtyDisp.textContent = '0';
         remainingDisp.textContent = state.totalQty;
         renderReasons();
+        if (draftRes && draftRes.success && draftRes.has_draft && draftRes.draft_data) {
+          var dd = draftRes.draft_data;
+          state.pendingRestore = dd;
+          if (dd.remarks) {
+            var remarksInp = document.getElementById('naRejectRemarksInput');
+            if (remarksInp) remarksInp.value = dd.remarks;
+          }
+          if (dd.reason_qtys && dd.reason_qtys.length > 0) {
+            dd.reason_qtys.forEach(function (rq) {
+              var inp = reasonsGrid.querySelector('[data-reason-id="' + rq.reason_id + '"]');
+              if (inp) inp.value = rq.qty;
+            });
+            var totalRej = 0;
+            dd.reason_qtys.forEach(function (rq) { totalRej += (rq.qty || 0); });
+            if (totalRej > 0 && totalRej <= state.totalQty) {
+              totalQtyDisp.textContent = totalRej;
+              remainingDisp.textContent = Math.max(0, state.totalQty - totalRej);
+              fetchAllocation(totalRej);
+            }
+          }
+        }
       }).catch(function () {
         reasonsGrid.innerHTML = '<span style="color:red;">Server error</span>';
       });
@@ -1695,6 +1719,8 @@ document.addEventListener("DOMContentLoaded", function() {
           if (!data.success) return;
           state.rejectSlots = data.reject_slots;
           state.acceptSlots = data.accept_slots;
+          state.acceptAutoTrays = data.accept_auto_trays || [];
+          state.autoDelinkIds = data.auto_delink_tray_ids || [];
           state.reuseTrays = [];
           state.rejPrefix = data.rej_prefix || 'NB';
           state.rejCap = data.rej_cap || 16;
@@ -1719,12 +1745,23 @@ document.addEventListener("DOMContentLoaded", function() {
         delinkSection.style.display = 'none';
         reuseInfo.style.display = 'none';
       }
-      var accInputs = Array.from(acceptSlotsCont.querySelectorAll('.na-acc-tray-input'));
-      remaining.forEach(function (chip, i) {
-        if (i < accInputs.length) accInputs[i].value = chip.dataset.trayId;
+      var delinkedIdSet = delinked.map(function (c) { return c.dataset.trayId; });
+      var filteredAutoTrays = (state.acceptAutoTrays || []).filter(function (t) {
+        return delinkedIdSet.indexOf(t.tray_id) === -1;
       });
-      for (var j = remaining.length; j < accInputs.length; j++) {
-        accInputs[j].value = '';
+      var accInputs = Array.from(acceptSlotsCont.querySelectorAll('.na-acc-tray-input'));
+      var slot0Val = accInputs.length > 0 ? accInputs[0].value.trim().toUpperCase() : '';
+      if (!slot0Val) {
+        for (var j = 1; j < accInputs.length; j++) accInputs[j].value = '';
+      } else {
+        var filteredForRest = filteredAutoTrays.filter(function (t) { return t.tray_id !== slot0Val; });
+        var availSlots = accInputs.length - 1;
+        filteredForRest.slice(0, availSlots).forEach(function (t, i) {
+          accInputs[i + 1].value = t.tray_id;
+        });
+        for (var k = Math.min(filteredForRest.length, availSlots) + 1; k < accInputs.length; k++) {
+          accInputs[k].value = '';
+        }
       }
     }
 
@@ -1740,26 +1777,20 @@ document.addEventListener("DOMContentLoaded", function() {
         chip.style.cssText = 'display:inline-flex;align-items:center;gap:4px;background:#e3f2fd;border:1px solid #90caf9;border-radius:14px;padding:3px 12px;font-size:12px;cursor:pointer;user-select:none;margin:2px;transition:all 0.15s;';
         chip.textContent = t.tray_id + ' (' + t.qty + ')';
         if (t.is_top) chip.style.borderColor = '#1565c0';
-        chip.title = 'Click to mark/unmark as delink';
+        chip.title = 'Click to fill into next accept tray slot';
         chip.dataset.trayId = t.tray_id;
         chip.dataset.qty = t.qty;
         chip.dataset.isTop = t.is_top ? '1' : '0';
         chip.dataset.selected = '0';
         chip.addEventListener('click', function () {
-          if (chip.dataset.selected === '1') {
-            chip.dataset.selected = '0';
-            chip.style.background = '#e3f2fd';
-            chip.style.borderColor = t.is_top ? '#1565c0' : '#90caf9';
-            chip.style.textDecoration = 'none';
-            chip.style.opacity = '1';
-          } else {
-            chip.dataset.selected = '1';
-            chip.style.background = '#fff3e0';
-            chip.style.borderColor = '#e65100';
-            chip.style.textDecoration = 'line-through';
-            chip.style.opacity = '0.7';
+          var accInputs = Array.from(acceptSlotsCont.querySelectorAll('.na-acc-tray-input'));
+          for (var ai = 0; ai < accInputs.length; ai++) {
+            if (!accInputs[ai].value.trim()) {
+              accInputs[ai].value = t.tray_id;
+              if (ai === 0) accInputs[ai].dispatchEvent(new Event('input'));
+              break;
+            }
           }
-          updateDelinkSection();
         });
         origContainer.appendChild(chip);
       });
@@ -1777,37 +1808,61 @@ document.addEventListener("DOMContentLoaded", function() {
         rejectSlotsCont.appendChild(wrap);
       });
 
-      var origTrays = data.original_trays || [];
       (data.accept_slots || []).forEach(function (slot, i) {
-        var autoTray = origTrays[i] ? origTrays[i].tray_id : '';
         var wrap = document.createElement('div');
         wrap.style.cssText = 'display:flex;align-items:center;gap:6px;margin-bottom:6px;';
         wrap.innerHTML =
           '<span style="font-size:11px;color:#888;min-width:24px;">' + (i + 1) + '.</span>' +
-          '<input class="na-acc-tray-input" type="text" placeholder="Tray ID" value="' + autoTray + '" ' +
+          '<input class="na-acc-tray-input" type="text" placeholder="Tray ID" value="" ' +
           'style="flex:1;border:1px solid #a5d6a7;border-radius:4px;padding:3px 6px;font-size:12px;" ' +
           'data-qty="' + slot.qty + '" data-is-top="' + (slot.is_top ? '1' : '0') + '" data-slot-idx="' + i + '">' +
           '<span style="font-size:12px;color:#388e3c;">× ' + slot.qty + '</span>';
         acceptSlotsCont.appendChild(wrap);
       });
 
+      var allAccSlotInputs = Array.from(acceptSlotsCont.querySelectorAll('.na-acc-tray-input'));
+      if (allAccSlotInputs.length >= 1) {
+        allAccSlotInputs[0].addEventListener('input', function () {
+          var topVal = allAccSlotInputs[0].value.trim().toUpperCase();
+          allAccSlotInputs[0].value = topVal;
+          if (topVal) {
+            var otherTrays = (state.acceptAutoTrays || []).filter(function (t) { return t.tray_id !== topVal; });
+            var availSlots = allAccSlotInputs.length - 1;
+            otherTrays.slice(0, availSlots).forEach(function (t, idx) {
+              allAccSlotInputs[idx + 1].value = t.tray_id;
+            });
+            for (var k = Math.min(otherTrays.length, availSlots) + 1; k < allAccSlotInputs.length; k++) {
+              allAccSlotInputs[k].value = '';
+            }
+            origContainer.querySelectorAll('span[data-tray-id]').forEach(function (chip) {
+              if ((state.autoDelinkIds || []).indexOf(chip.dataset.trayId) !== -1) {
+                chip.dataset.selected = '1';
+                chip.style.background = '#fff3e0';
+                chip.style.borderColor = '#e65100';
+                chip.style.textDecoration = 'line-through';
+                chip.style.opacity = '0.7';
+              }
+            });
+            updateDelinkSection();
+          } else {
+            origContainer.querySelectorAll('span[data-tray-id]').forEach(function (chip) {
+              if ((state.autoDelinkIds || []).indexOf(chip.dataset.trayId) !== -1) {
+                chip.dataset.selected = '0';
+                chip.style.background = '#e3f2fd';
+                chip.style.borderColor = chip.dataset.isTop === '1' ? '#1565c0' : '#90caf9';
+                chip.style.textDecoration = 'none';
+                chip.style.opacity = '1';
+              }
+            });
+            for (var k2 = 1; k2 < allAccSlotInputs.length; k2++) allAccSlotInputs[k2].value = '';
+            updateDelinkSection();
+          }
+        });
+      }
+
       delinkSection.style.display = 'none';
       reuseInfo.style.display = 'none';
       combDelink.textContent = '0';
-
-      var autoDelinkIds = data.auto_delink_tray_ids || [];
-      if (autoDelinkIds.length > 0) {
-        origContainer.querySelectorAll('span[data-tray-id]').forEach(function (chip) {
-          if (autoDelinkIds.indexOf(chip.dataset.trayId) !== -1) {
-            chip.dataset.selected = '1';
-            chip.style.background = '#fff3e0';
-            chip.style.borderColor = '#e65100';
-            chip.style.textDecoration = 'line-through';
-            chip.style.opacity = '0.7';
-          }
-        });
-        updateDelinkSection();
-      }
 
       rejectQtyLabel.textContent = data.rejected_qty || 0;
       acceptQtyLabel.textContent = data.accepted_qty || 0;
@@ -1815,6 +1870,23 @@ document.addEventListener("DOMContentLoaded", function() {
       combAccept.textContent = data.accepted_qty || 0;
       allocSection.style.display = '';
       state.allocDone = true;
+
+      if (state.pendingRestore) {
+        var pd = state.pendingRestore;
+        state.pendingRestore = null;
+        if (pd.reject_trays && pd.reject_trays.length > 0) {
+          var allRejInputs = Array.from(rejectSlotsCont.querySelectorAll('.na-rej-tray-input'));
+          pd.reject_trays.forEach(function (rt, i) {
+            if (allRejInputs[i] && rt.tray_id) allRejInputs[i].value = rt.tray_id;
+          });
+        }
+        if (pd.accept_trays && pd.accept_trays.length > 0) {
+          var allAccInputs = Array.from(acceptSlotsCont.querySelectorAll('.na-acc-tray-input'));
+          pd.accept_trays.forEach(function (at, i) {
+            if (allAccInputs[i] && at.tray_id) allAccInputs[i].value = at.tray_id;
+          });
+        }
+      }
 
       rejectSlotsCont.querySelectorAll('.na-rej-tray-input').forEach(function (inp) {
         var statusEl = inp.nextElementSibling;
@@ -1923,7 +1995,50 @@ document.addEventListener("DOMContentLoaded", function() {
 
     if (draftBtn) {
       draftBtn.addEventListener('click', function () {
-        errDiv.textContent = 'Draft save not yet implemented.';
+        errDiv.textContent = '';
+        var reasonQtys = [];
+        reasonsGrid.querySelectorAll('.na-reason-qty').forEach(function (inp) {
+          var qty = parseInt(inp.value, 10) || 0;
+          if (qty > 0) reasonQtys.push({ reason_id: parseInt(inp.dataset.reasonId, 10), qty: qty });
+        });
+        var rejTrays = [];
+        rejectSlotsCont.querySelectorAll('.na-rej-tray-input').forEach(function (inp) {
+          var tid = inp.value.trim();
+          var qty = parseInt(inp.dataset.qty, 10) || 0;
+          if (tid) rejTrays.push({ tray_id: tid, qty: qty });
+        });
+        var accTrays = [];
+        acceptSlotsCont.querySelectorAll('.na-acc-tray-input').forEach(function (inp) {
+          var tid = inp.value.trim();
+          var qty = parseInt(inp.dataset.qty, 10) || 0;
+          if (tid) accTrays.push({ tray_id: tid, qty: qty, is_top: inp.dataset.isTop === '1' });
+        });
+        draftBtn.disabled = true;
+        draftBtn.innerHTML = '<i class="fa fa-save"></i> Saving...';
+        post(API_BASE + 'action/', {
+          action: 'SAVE_DRAFT',
+          lot_id: state.lotId,
+          draft_data: {
+            reason_qtys: reasonQtys,
+            reject_trays: rejTrays,
+            accept_trays: accTrays,
+            remarks: document.getElementById('naRejectRemarksInput').value.trim(),
+            rejected_qty: getTotalRejectQty(),
+          },
+        }).then(function (data) {
+          if (data.success) {
+            closeModal();
+            setTimeout(function () { location.reload(); }, 300);
+          } else {
+            errDiv.textContent = data.error || 'Draft save failed';
+            draftBtn.disabled = false;
+            draftBtn.innerHTML = '<i class="fa fa-save"></i> Draft';
+          }
+        }).catch(function () {
+          errDiv.textContent = 'Server error saving draft';
+          draftBtn.disabled = false;
+          draftBtn.innerHTML = '<i class="fa fa-save"></i> Draft';
+        });
       });
     }
   });

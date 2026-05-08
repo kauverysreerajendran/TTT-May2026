@@ -14,6 +14,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from django.contrib.auth.decorators import login_required
 import traceback
+import logging
 from rest_framework import status
 from django.http import JsonResponse
 import json
@@ -31,6 +32,8 @@ from Jig_Unloading.models import *
 from Jig_Unloading.tray_utils import get_upstream_tray_distribution, get_model_master_tray_info
 from Inprocess_Inspection.models import InprocessInspectionTrayCapacity
 from django.contrib.auth.decorators import login_required
+
+logger = logging.getLogger(__name__)
 
 
 def _get_input_source(jig_unload_obj):
@@ -56,6 +59,124 @@ def _get_input_source(jig_unload_obj):
                 names = [tray.batch_id.location.location_name]
                 break
     return ', '.join(names)
+
+
+def _normalize_source_lot_id(raw_lot_id):
+    lot_id = str(raw_lot_id or '').strip()
+    if '-' in lot_id:
+        return lot_id.rsplit('-', 1)[-1]
+    return lot_id
+
+
+def _source_lot_ids(jig_unload_obj):
+    source_lots = []
+    for raw_lot_id in jig_unload_obj.combine_lot_ids or []:
+        lot_id = _normalize_source_lot_id(raw_lot_id)
+        if lot_id:
+            source_lots.append(lot_id)
+    return source_lots or [jig_unload_obj.lot_id]
+
+
+def _unique_pick_rows_by_source_lot(queryset):
+    seen_source_lots = set()
+    unique_rows = []
+    for jig_unload_obj in queryset:
+        source_lots = _source_lot_ids(jig_unload_obj)
+        if any(lot_id in seen_source_lots for lot_id in source_lots):
+            continue
+        unique_rows.append(jig_unload_obj)
+        seen_source_lots.update(source_lots)
+    return unique_rows
+
+
+def _na_tray_capacity(tray_type_name):
+    if not tray_type_name:
+        return 0
+    name = tray_type_name.strip().lower()
+    if name.startswith('nr') or name.startswith('nb') or name.startswith('nd') or name in ['normal', 'normal tray']:
+        return 20
+    if name.startswith('jb') or 'jumbo' in name:
+        return 12
+    custom = InprocessInspectionTrayCapacity.objects.filter(
+        tray_type__tray_type__iexact=tray_type_name, is_active=True
+    ).first()
+    if custom:
+        return custom.custom_capacity
+    tt = TrayType.objects.filter(tray_type__iexact=tray_type_name).first()
+    return tt.tray_capacity if tt else 0
+
+
+def _na_completed_filter_q():
+    return (
+        Q(na_qc_accptance=True)
+        | Q(na_qc_rejection=True)
+        | Q(na_qc_few_cases_accptance=True, na_onhold_picking=False)
+    )
+
+
+def _na_completed_source_lot_ids(allowed_color_ids):
+    completed_sources = set()
+    completed_rows = (
+        JigUnloadAfterTable.objects.filter(
+            total_case_qty__gt=0,
+            plating_color_id__in=allowed_color_ids,
+        )
+        .filter(_na_completed_filter_q())
+        .only('lot_id', 'combine_lot_ids')
+    )
+    for completed_row in completed_rows:
+        completed_sources.update(_source_lot_ids(completed_row))
+    return completed_sources
+
+
+def _active_audit_zone_pick_rows(queryset, completed_source_lots):
+    active_rows = []
+    seen_source_lots = set()
+    input_count = 0
+    direct_submission_excluded = 0
+    completed_source_excluded = 0
+    duplicate_source_excluded = 0
+
+    for jig_unload_obj in queryset:
+        input_count += 1
+        source_lots = _source_lot_ids(jig_unload_obj)
+        if getattr(jig_unload_obj, 'has_submission', False):
+            direct_submission_excluded += 1
+            logger.info(
+                "[AUDIT_PICKTABLE_FILTER] zone=Z2 exclude lot=%s sources=%s reason=direct_submission",
+                jig_unload_obj.lot_id,
+                source_lots,
+            )
+            continue
+        if any(lot_id in completed_source_lots for lot_id in source_lots):
+            completed_source_excluded += 1
+            logger.info(
+                "[AUDIT_PICKTABLE_FILTER] zone=Z2 exclude lot=%s sources=%s reason=completed_source",
+                jig_unload_obj.lot_id,
+                source_lots,
+            )
+            continue
+        if any(lot_id in seen_source_lots for lot_id in source_lots):
+            duplicate_source_excluded += 1
+            logger.info(
+                "[AUDIT_PICKTABLE_FILTER] zone=Z2 exclude lot=%s sources=%s reason=duplicate_source",
+                jig_unload_obj.lot_id,
+                source_lots,
+            )
+            continue
+        active_rows.append(jig_unload_obj)
+        seen_source_lots.update(source_lots)
+
+    logger.info(
+        "[AUDIT_PICKTABLE_FILTER] zone=Z2 input=%d output=%d direct_submission_excluded=%d completed_source_excluded=%d duplicate_source_excluded=%d completed_sources=%d",
+        input_count,
+        len(active_rows),
+        direct_submission_excluded,
+        completed_source_excluded,
+        duplicate_source_excluded,
+        len(completed_source_lots),
+    )
+    return active_rows
   
 
 
@@ -93,10 +214,15 @@ class NA_Zone_PickTableView(APIView):
             lot_id=OuterRef('lot_id')
         ).values('total_rejection_quantity')[:1]
 
+        has_submission_subquery = Exists(
+            NickelAudit_Submission.objects.filter(lot_id=OuterRef('lot_id'))
+        )
+
         queryset = queryset.annotate(
             has_draft=has_draft_subquery,
             draft_type=draft_type_subquery,
             brass_rejection_total_qty=brass_rejection_qty_subquery,
+            has_submission=has_submission_subquery,
         )
 
         queryset = queryset.filter(
@@ -119,7 +245,9 @@ class NA_Zone_PickTableView(APIView):
         ).distinct().order_by('-nq_last_process_date_time', '-lot_id')
 
         page_number = request.GET.get('page', 1)
-        paginator = Paginator(queryset, 10)
+        completed_source_lots = _na_completed_source_lot_ids(allowed_color_ids)
+        pick_rows = _active_audit_zone_pick_rows(queryset, completed_source_lots)
+        paginator = Paginator(pick_rows, 10)
         page_obj = paginator.get_page(page_number)
 
         master_data = []
@@ -135,7 +263,9 @@ class NA_Zone_PickTableView(APIView):
                 'vendor_internal': '',
                 'location__location_name': _get_input_source(jig_unload_obj),
                 'tray_type': get_model_master_tray_info(jig_unload_obj.plating_stk_no, jig_unload_obj.tray_type or '')[0],
-                'tray_capacity': get_model_master_tray_info(jig_unload_obj.plating_stk_no, jig_unload_obj.tray_type or '', jig_unload_obj.tray_capacity or 0)[1],
+                'tray_capacity': _na_tray_capacity(
+                    get_model_master_tray_info(jig_unload_obj.plating_stk_no, jig_unload_obj.tray_type or '')[0]
+                ) or _na_tray_capacity(jig_unload_obj.tray_type or '') or jig_unload_obj.tray_capacity or 0,
                 'stock_lot_id': jig_unload_obj.lot_id,
                 'total_IP_accpeted_quantity': jig_unload_obj.total_case_qty,
                 'na_ac_accepted_qty_verified': jig_unload_obj.na_ac_accepted_qty_verified,
@@ -245,6 +375,11 @@ class NA_Zone_PickTableView(APIView):
             'nq_rejection_reasons': nq_rejection_reasons,
             'pick_table_count': len(master_data),
         }
+        logger.info(
+            "[AUDIT_PICKTABLE_FILTER] zone=Z2 page_rows=%d lot_ids=%s",
+            len(master_data),
+            [data['stock_lot_id'] for data in master_data],
+        )
         return Response(context, template_name=self.template_name)
 
 

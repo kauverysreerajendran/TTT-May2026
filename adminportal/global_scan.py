@@ -146,9 +146,13 @@ class GlobalTraySearchView(LoginRequiredMixin, View):
         try:
             from modelmasterapp.models import TrayId, DraftTrayId, TotalStockModel
             for t in TrayId.objects.filter(tray_query):
+                if getattr(t, 'lot_id', None):
+                    lot_ids.add(t.lot_id)
                 if t.batch_id_id:
                     batch_ids.add(t.batch_id_id)
             for t in DraftTrayId.objects.filter(tray_query):
+                if getattr(t, 'lot_id', None):
+                    lot_ids.add(t.lot_id)
                 if getattr(t, 'batch_id_id', None):
                     batch_ids.add(t.batch_id_id)
         except Exception as e:
@@ -602,17 +606,25 @@ class GlobalTraySearchView(LoginRequiredMixin, View):
 
     def _check_lot_in_day_planning(self, lot_id):
         try:
+            from modelmasterapp.models import ModelMasterCreation
             stock = self._stock_for(lot_id)
-            if not stock or not stock.batch_id:
+            queryset = ModelMasterCreation.objects.filter(
+                total_batch_quantity__gt=0,
+                Moved_to_D_Picker=False,
+            )
+            if stock and stock.batch_id_id:
+                queryset = queryset.filter(pk=stock.batch_id_id)
+            else:
+                queryset = queryset.filter(lot_id=lot_id)
+            batch = queryset.first()
+            if not batch:
                 return None
-            # Day Planning is the catch-all final fallback when no other
-            # active module owns the lot. The dispatcher checks this last.
-            batch = stock.batch_id
             return {
                 'module': 'Day Planning',
                 'url': reverse('dp_pick_table'),
-                'lot_id': lot_id,
+                'lot_id': batch.lot_id or lot_id,
                 'batch_id': batch.batch_id,
+                'stock_lot_id': batch.lot_id or lot_id,
             }
         except Exception as e:
             logger.error('%s _check_lot_in_day_planning: %s', SCAN_TAG, e)
@@ -622,14 +634,19 @@ class GlobalTraySearchView(LoginRequiredMixin, View):
         """Last-resort batch-level fallback when no lot_id was found."""
         try:
             from modelmasterapp.models import ModelMasterCreation
-            batch = ModelMasterCreation.objects.filter(pk__in=batch_ids).first()
+            batch = ModelMasterCreation.objects.filter(
+                pk__in=batch_ids,
+                total_batch_quantity__gt=0,
+                Moved_to_D_Picker=False,
+            ).first()
             if not batch:
                 return None
             return {
                 'module': 'Day Planning',
                 'url': reverse('dp_pick_table'),
-                'lot_id': batch.batch_id,
+                'lot_id': batch.lot_id or batch.batch_id,
                 'batch_id': batch.batch_id,
+                'stock_lot_id': batch.lot_id or batch.batch_id,
             }
         except Exception as e:
             logger.error('%s _check_batch_in_day_planning: %s', SCAN_TAG, e)

@@ -64,6 +64,40 @@
   background: #6c757d; color: #fff; border: none; padding: 6px 16px;
   border-radius: 6px; font-weight: 600; cursor: pointer;
 }
+.ss-tray-view-btn {
+  background: transparent; border: none; padding: 2px 4px; cursor: pointer;
+  display: inline-flex; align-items: center; gap: 6px; color: #028084;
+}
+.ss-tray-view-btn img { width: 22px; height: 22px; object-fit: contain; }
+.ss-tray-count-pill {
+  display: inline-flex; align-items: center; justify-content: center; min-width: 20px; height: 20px;
+  border-radius: 999px; background: #e7f7f7; border: 1px solid #b9e5e6; color: #025254;
+  font-size: 11px; font-weight: 700; padding: 0 6px;
+}
+.ss-tray-view-overlay {
+  display: none; position: fixed; inset: 0; background: rgba(15, 23, 42, 0.34);
+  z-index: 100000; align-items: center; justify-content: center; padding: 16px;
+}
+.ss-tray-view-overlay.open { display: flex; }
+.ss-tray-view-box {
+  background: #fff; border: 1px solid #dce7eb; border-radius: 8px; width: min(460px, calc(100vw - 32px));
+  box-shadow: 0 18px 44px rgba(15, 23, 42, 0.18); overflow: hidden;
+}
+.ss-tray-view-header {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 12px 16px; background: #f7fbfb; border-bottom: 1px solid #dce7eb;
+}
+.ss-tray-view-title { color: #025254; font-size: 15px; font-weight: 700; margin: 0; }
+.ss-tray-view-close { background: transparent; border: none; color: #60727c; font-size: 24px; line-height: 1; cursor: pointer; }
+.ss-tray-view-body { padding: 14px 16px 16px; }
+.ss-tray-view-meta { color: #51656f; font-size: 12px; font-weight: 700; margin-bottom: 10px; }
+.ss-tray-view-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; }
+.ss-tray-view-chip {
+  display: flex; align-items: center; gap: 8px; min-height: 34px; padding: 7px 9px;
+  border: 1px solid #cfe0e5; background: #fbfcfd; border-radius: 6px; color: #17333d; font-size: 12px; font-weight: 700;
+}
+.ss-tray-view-index { color: #6b7b84; font-size: 11px; font-weight: 600; }
+.ss-tray-view-empty { text-align: center; color: #6b7b84; padding: 12px; font-size: 12px; font-weight: 600; }
 @media (pointer: coarse) and (min-width: 680px) and (max-width: 1400px) {
   #order-listing {
     --ss-sticky-col-1: 90px;
@@ -140,8 +174,13 @@
                   <td>{{ item.location }}</td>
                   <td>{{ item.total_case_qty }}</td>
                   <td>
-                    {% if item.linked_tray_id %}
-                      <span class="badge bg-success text-white">{{ item.linked_tray_id }}</span>
+                    {% if item.linked_tray_ids %}
+                      <button type="button" class="ss-tray-view-btn" title="View delinked tray IDs"
+                              data-lot-id="{{ item.lot_id }}"
+                              data-tray-ids="{{ item.linked_tray_ids|join:'|' }}">
+                        <img src="{% static 'assets/icons/view.png' %}" alt="View" />
+                        <span class="ss-tray-count-pill">{{ item.linked_tray_count }}</span>
+                      </button>
                     {% else %}
                       <span class="text-muted">—</span>
                     {% endif %}
@@ -189,4 +228,75 @@
     </div>
   </div>
 </div>
+
+<div class="ss-tray-view-overlay" id="ssTrayViewOverlay" aria-hidden="true">
+  <div class="ss-tray-view-box" role="dialog" aria-modal="true" aria-labelledby="ssTrayViewTitle">
+    <div class="ss-tray-view-header">
+      <h5 class="ss-tray-view-title" id="ssTrayViewTitle">Delinked Tray IDs</h5>
+      <button type="button" class="ss-tray-view-close" id="ssTrayViewClose" aria-label="Close">&times;</button>
+    </div>
+    <div class="ss-tray-view-body">
+      <div class="ss-tray-view-meta" id="ssTrayViewMeta">Lot: -</div>
+      <div class="ss-tray-view-list" id="ssTrayViewList"></div>
+    </div>
+  </div>
+</div>
+
+<script nonce="{{ csp_nonce }}">
+document.addEventListener('DOMContentLoaded', function() {
+  const overlay = document.getElementById('ssTrayViewOverlay');
+  const closeBtn = document.getElementById('ssTrayViewClose');
+  const meta = document.getElementById('ssTrayViewMeta');
+  const list = document.getElementById('ssTrayViewList');
+
+  function closeTrayView() {
+    overlay.classList.remove('open');
+    overlay.setAttribute('aria-hidden', 'true');
+  }
+
+  function openTrayView(button) {
+    const lotId = button.getAttribute('data-lot-id') || '-';
+    const trayIds = (button.getAttribute('data-tray-ids') || '').split('|').map(function(trayId) {
+      return trayId.trim();
+    }).filter(Boolean);
+
+    meta.textContent = 'Lot: ' + lotId + ' | ' + trayIds.length + (trayIds.length === 1 ? ' tray' : ' trays');
+    list.innerHTML = '';
+    if (!trayIds.length) {
+      const empty = document.createElement('div');
+      empty.className = 'ss-tray-view-empty';
+      empty.textContent = 'No tray IDs found.';
+      list.appendChild(empty);
+    } else {
+      trayIds.forEach(function(trayId, index) {
+        const chip = document.createElement('div');
+        chip.className = 'ss-tray-view-chip';
+        const serial = document.createElement('span');
+        serial.className = 'ss-tray-view-index';
+        serial.textContent = String(index + 1).padStart(2, '0');
+        const value = document.createElement('span');
+        value.textContent = trayId;
+        chip.append(serial, value);
+        list.appendChild(chip);
+      });
+    }
+    overlay.classList.add('open');
+    overlay.setAttribute('aria-hidden', 'false');
+    closeBtn.focus();
+  }
+
+  document.querySelectorAll('.ss-tray-view-btn').forEach(function(button) {
+    button.addEventListener('click', function() {
+      openTrayView(button);
+    });
+  });
+  closeBtn.addEventListener('click', closeTrayView);
+  overlay.addEventListener('click', function(event) {
+    if (event.target === overlay) closeTrayView();
+  });
+  document.addEventListener('keydown', function(event) {
+    if (event.key === 'Escape' && overlay.classList.contains('open')) closeTrayView();
+  });
+});
+</script>
 {% endblock %}

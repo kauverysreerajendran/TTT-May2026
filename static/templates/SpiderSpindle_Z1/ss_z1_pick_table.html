@@ -423,7 +423,9 @@ document.addEventListener('DOMContentLoaded', function() {
       .then(r => r.json())
       .then(data => {
         if (data.success) {
-          Swal.fire({ title: 'Success', text: data.message || 'Spider added successfully!', icon: 'success', timer: 1500, showConfirmButton: false }).then(() => location.reload());
+          Swal.fire({ title: 'Success', text: data.message || 'Spider added successfully!', icon: 'success', timer: 1500, showConfirmButton: false }).then(() => {
+            window.location.href = "{% url 'ss_z1_completed' %}";
+          });
         } else {
           Swal.fire('Error', data.error || 'Failed to add spider.', 'error');
           btn.disabled = false;

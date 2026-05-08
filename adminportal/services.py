@@ -5,11 +5,249 @@ Cache TTL: 5 minutes (configurable).
 """
 from django.core.cache import cache
 from django.conf import settings
+from django.db import transaction
+from django.contrib.auth.models import Group
 import logging
 import time
 from .selectors import get_all_dashboard_stats
+from .models import Module, UserModuleProvision
+from .module_registry import LEGACY_MODULE_NAME_MAP, MODULE_REGISTRY, USER_CATEGORY_MODULES
 
 logger = logging.getLogger(__name__)
+
+USER_MODULE_CACHE_TTL = 300
+MODULE_REGISTRY_CACHE_KEY = 'adminportal_module_registry_seeded_v2'
+MODULE_REGISTRY_NAMES = [entry['name'] for entry in MODULE_REGISTRY]
+
+DASHBOARD_MODULE_ACCESS = {
+    'Day Planning': {'Data Upload', 'DP Pick Table', 'DP Complete Table'},
+    'Input Screening': {
+        'Input Pick Table', 'Input Completed Table', 'Input Accept Table',
+        'Input Reject Table', 'Input Main Table', 'Input Complete Table',
+    },
+    'Brass QC': {'Brass Qc Pick Table', 'Brass Qc Completed Table', 'Brass QC Pick Table', 'Brass QC Complete Table', 'Brass QC Completed Table'},
+    'Brass Audit': {'Brass Audit Pick Table', 'Brass Audit Complete Table', 'Brass Audit Reject Table'},
+    'IQF': {'IQF Pick Table', 'IQF Completed Table', 'IQF Accept Table', 'IQF Reject Table'},
+    'Jig Loading': {'Jig Pick Table', 'Jig Completed Table'},
+    'Jig Unloading': {'JUL Main Table', 'JUL Completed', 'JUL Main Table Zone 2', 'JUL Completed Zone 2'},
+    'Inprocess Inspection': {'IP Main', 'IP Completed'},
+    'Nickel Inspection': {'Nickel Main Table', 'Nickel Completed Table'},
+    'Nickel Audit': {'NA Pick Table', 'NA Completed'},
+    'Spider Spindle': {
+        'Spider Spindle Z1 Pick Table', 'Spider Spindle Z1 Completed Table',
+        'Spider Spindle Z2 Pick Table', 'Spider Spindle Z2 Completed Table',
+    },
+}
+
+
+def ensure_module_registry_seeded():
+    """Create/update canonical modules, headings, file paths, and user categories."""
+    if cache.get(MODULE_REGISTRY_CACHE_KEY):
+        return
+
+    with transaction.atomic():
+        module_by_name = {}
+        for entry in MODULE_REGISTRY:
+            module, _ = Module.objects.update_or_create(
+                name=entry['name'],
+                defaults={
+                    'menu_title': entry.get('menu_title') or entry['name'],
+                    'headings': entry.get('headings') or [],
+                    'html_file': entry.get('file_name') or '',
+                },
+            )
+            module_by_name[module.name] = module
+
+        for group_name, module_names in USER_CATEGORY_MODULES.items():
+            group, _ = Group.objects.get_or_create(name=group_name)
+            modules = [module_by_name[name] for name in module_names if name in module_by_name]
+            group.modules.set(modules)
+
+    cache.set(MODULE_REGISTRY_CACHE_KEY, True, timeout=USER_MODULE_CACHE_TTL)
+
+
+def is_admin_user(user):
+    """Return True for superusers, Admin group users, or Admin department users."""
+    if not getattr(user, 'is_authenticated', False):
+        return False
+
+    return (
+        user.is_superuser
+        or user.groups.filter(name__iexact='Admin').exists()
+        or (
+            hasattr(user, 'userprofile')
+            and user.userprofile.department
+            and user.userprofile.department.name.lower() == 'admin'
+        )
+    )
+
+
+def _group_module_queryset(user):
+    """Modules mapped directly to the user's selected user-category groups."""
+    ensure_module_registry_seeded()
+    return Module.objects.filter(groups__in=user.groups.all()).distinct()
+
+
+def _all_module_names():
+    ensure_module_registry_seeded()
+    existing_names = set(Module.objects.filter(name__in=MODULE_REGISTRY_NAMES).values_list('name', flat=True))
+    return [name for name in MODULE_REGISTRY_NAMES if name in existing_names]
+
+
+def _registry_modules():
+    modules_by_name = {module.name: module for module in Module.objects.filter(name__in=MODULE_REGISTRY_NAMES)}
+    return [modules_by_name[name] for name in MODULE_REGISTRY_NAMES if name in modules_by_name]
+
+
+def _expand_legacy_module_names(module_names):
+    expanded = []
+    for name in module_names:
+        replacements = LEGACY_MODULE_NAME_MAP.get(name, [name])
+        for replacement in replacements:
+            if replacement not in expanded:
+                expanded.append(replacement)
+    return expanded
+
+
+def get_user_allowed_module_names(user):
+    """
+    Resolve dashboard/sidebar module access for a user.
+
+    Priority:
+    1. Admin users get all modules.
+    2. User Category groups with mapped Module rows restrict access to those modules.
+    3. Manual UserModuleProvision rows are used for normal/custom users.
+    4. Legacy fallback keeps existing unrestricted users working until provisioned.
+    """
+    if not getattr(user, 'is_authenticated', False):
+        return []
+
+    ensure_module_registry_seeded()
+
+    cache_key = f'user_modules_{user.id}'
+    cached_modules = cache.get(cache_key)
+    if cached_modules is not None:
+        return cached_modules
+
+    try:
+        if is_admin_user(user):
+            modules = _all_module_names()
+        else:
+            group_modules = list(_group_module_queryset(user).values_list('name', flat=True))
+            if group_modules:
+                modules = group_modules
+            else:
+                provisioned_modules = list(
+                    UserModuleProvision.objects.filter(user=user)
+                    .values_list('module_name', flat=True)
+                    .distinct()
+                )
+                modules = _expand_legacy_module_names(provisioned_modules) if provisioned_modules else _all_module_names()
+
+        cache.set(cache_key, modules, timeout=USER_MODULE_CACHE_TTL)
+        return modules
+    except Exception:
+        logger.exception('Error resolving user module access for user_id=%s', getattr(user, 'id', None))
+        return list(
+            UserModuleProvision.objects.filter(user=user)
+            .values_list('module_name', flat=True)
+            .distinct()
+        )
+
+
+def get_user_allowed_module_payload(user):
+    """Return editable module payloads for the admin provisioning UI."""
+    if not getattr(user, 'is_authenticated', False):
+        return []
+
+    ensure_module_registry_seeded()
+
+    def module_payload(module, selected_headings=None):
+        all_headings = module.headings or []
+        return {
+            'name': module.name,
+            'headings': selected_headings if selected_headings is not None else all_headings,
+            'all_headings': all_headings,
+            'file_name': module.html_file or '',
+        }
+
+    if is_admin_user(user):
+        modules = _registry_modules()
+        return [module_payload(module) for module in modules]
+
+    group_modules = list(_group_module_queryset(user))
+    if group_modules:
+        return [module_payload(module) for module in group_modules]
+
+    provisions = list(UserModuleProvision.objects.filter(user=user))
+    if provisions:
+        modules_by_name = {module.name: module for module in Module.objects.filter(name__in=MODULE_REGISTRY_NAMES)}
+        payload = []
+        seen_names = set()
+        for provision in provisions:
+            replacement_names = LEGACY_MODULE_NAME_MAP.get(provision.module_name, [provision.module_name])
+            for module_name in replacement_names:
+                if module_name in seen_names:
+                    continue
+                seen_names.add(module_name)
+                module = modules_by_name.get(module_name)
+                if module:
+                    selected_headings = provision.headings or module.headings or []
+                    payload.append(module_payload(module, selected_headings))
+                    continue
+                payload.append({
+                    'name': module_name,
+                    'headings': provision.headings or [],
+                    'all_headings': provision.headings or [],
+                    'file_name': provision.file_name or '',
+                })
+        return payload
+
+    modules = _registry_modules()
+    return [module_payload(module) for module in modules]
+
+
+def sync_user_module_provisions_from_group(user):
+    """Persist group-mapped modules as UserModuleProvision rows for fixed user categories."""
+    if not getattr(user, 'is_authenticated', False):
+        return False
+
+    ensure_module_registry_seeded()
+
+    group_modules = list(_group_module_queryset(user))
+    if not group_modules:
+        return False
+
+    with transaction.atomic():
+        UserModuleProvision.objects.filter(user=user).delete()
+        for module in group_modules:
+            UserModuleProvision.objects.update_or_create(
+                user=user,
+                module_name=module.name,
+                defaults={
+                    'headings': module.headings or [],
+                    'file_name': module.html_file or '',
+                },
+            )
+
+    invalidate_user_modules_cache(user.id)
+    return True
+
+
+def filter_dashboard_stats_for_modules(dashboard_stats, allowed_module_names):
+    """Keep only dashboard cards backed by the user's allowed module names."""
+    allowed_set = set(allowed_module_names or [])
+    if not allowed_set:
+        return []
+
+    filtered_stats = []
+    for stat in dashboard_stats:
+        label = stat.get('label')
+        required_modules = DASHBOARD_MODULE_ACCESS.get(label, {label})
+        if allowed_set.intersection(required_modules):
+            filtered_stats.append(stat)
+
+    return filtered_stats
 
 
 # Cache configuration - Extended TTL for better performance

@@ -24,7 +24,6 @@ from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import IsAuthenticated
 from adminportal.models import *
 from .models import *
-import traceback
 from django.core.paginator import Paginator
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
@@ -48,31 +47,8 @@ def get_allowed_modules_for_user(user):
     Optimized with caching per user for fast repeated calls.
     Cache key includes user ID to prevent cross-user data leakage.
     """
-    if not user.is_authenticated:
-        return []
-    
-    # Try cache first (5 min TTL, per-user)
-    from django.core.cache import cache
-    cache_key = f'user_modules_{user.id}'
-    cached_modules = cache.get(cache_key)
-    if cached_modules is not None:
-        return cached_modules
-    
-    # Cache miss: fetch from DB
-    try:
-        # Optimized: only fetch 'name' field, not full objects
-        modules = list(Module.objects.values_list('name', flat=True))
-    except Exception:
-        # Fallback to per-user provisions if Module table/query fails
-        modules = list(
-            UserModuleProvision.objects.filter(user=user)
-            .values_list('module_name', flat=True)
-            .distinct()
-        )
-    
-    # Cache for 5 minutes (shorter than dashboard stats since user permissions can change)
-    cache.set(cache_key, modules, timeout=300)
-    return modules
+    from .services import get_user_allowed_module_names
+    return get_user_allowed_module_names(user)
 
 
 
@@ -83,7 +59,7 @@ class IndexView(APIView):
  
     def get(self, request, format=None):
         from django.utils import timezone
-        from .services import get_cached_dashboard_stats
+        from .services import filter_dashboard_stats_for_modules, get_cached_dashboard_stats
         import time
         
         # Timing checkpoint 1: Start
@@ -99,6 +75,7 @@ class IndexView(APIView):
         # Get dashboard stats from cache (or fresh calculation)
         t3 = time.time()
         dashboard_stats = get_cached_dashboard_stats(request.user.id)
+        dashboard_stats = filter_dashboard_stats_for_modules(dashboard_stats, allowed_modules)
         t4 = time.time()
         if hasattr(request, 'timers'):
             request.timers['dashboard_stats'] = f'{(t4-t3)*1000:.2f}ms'
@@ -2222,24 +2199,15 @@ class AdminPortalView(APIView):
     template_name = 'AdminPortal/adminPortal.html'
     
     def get(self, request, format=None):
+        from .services import is_admin_user
+
         last_user = User.objects.order_by('-id').first()
         next_user_id = (last_user.id + 1) if last_user else 1
         allowed_modules = get_allowed_modules_for_user(request.user)
-        is_admin = (
-            request.user.is_authenticated and (
-                request.user.is_superuser
-                or request.user.groups.filter(name__iexact="Admin").exists()
-                or (
-                    hasattr(request.user, 'userprofile')
-                    and request.user.userprofile.department
-                    and request.user.userprofile.department.name.lower() == "admin"
-                )
-            )
-        )
         return Response({
             'next_user_id': next_user_id,
             'allowed_modules': allowed_modules,
-            'is_admin': is_admin,  # <-- Add this line
+            'is_admin': is_admin_user(request.user),
         })
 
 # Class for Department List APIs Masters
@@ -2262,6 +2230,8 @@ class RoleListAPIView(APIView):
 @method_decorator(csrf_exempt, name='dispatch')
 class UserCreateAPIView(APIView):
     def post(self, request, *args, **kwargs):
+        from .services import invalidate_user_modules_cache, sync_user_module_provisions_from_group
+
         data = request.data or {}
         email = data.get('email')
         first_name = data.get('first_name')
@@ -2295,6 +2265,8 @@ class UserCreateAPIView(APIView):
                             grp = Group.objects.get(id=group_id)
                             user.groups.clear()
                             user.groups.add(grp)
+                            if not sync_user_module_provisions_from_group(user):
+                                invalidate_user_modules_cache(user.id)
                         except Group.DoesNotExist:
                             pass
 
@@ -2337,24 +2309,23 @@ class UserCreateAPIView(APIView):
                             user.is_active = True
                             user.is_staff = True
                             user.is_superuser = True
+                        if not sync_user_module_provisions_from_group(user):
+                            invalidate_user_modules_cache(user.id)
                     except Group.DoesNotExist:
                         pass
 
                 user.save()
-
-                # Validate department and role for new user
-                if not department_id or not Department.objects.filter(id=department_id).exists():
-                    return Response({'success': False, 'error': 'Invalid department selected.'}, status=status.HTTP_400_BAD_REQUEST)
-                if not role_id or not Role.objects.filter(id=role_id).exists():
-                    return Response({'success': False, 'error': 'Invalid role selected.'}, status=status.HTTP_400_BAD_REQUEST)
 
                 # Ensure profile exists (signal may create it) and update it
                 profile = getattr(user, "userprofile", None)
                 if not profile:
                     profile = UserProfile.objects.create(user=user)
 
-                profile.department_id = department_id
-                profile.role_id = role_id
+                # Department and role are optional fields
+                if department_id and Department.objects.filter(id=department_id).exists():
+                    profile.department_id = department_id
+                if role_id and Role.objects.filter(id=role_id).exists():
+                    profile.role_id = role_id
                 profile.manager = data.get('manager')
                 profile.employment_status = data.get('employment_status')
                 profile.save()
@@ -2371,7 +2342,7 @@ class UserCreateAPIView(APIView):
             }, status=status.HTTP_201_CREATED)
 
         except Exception as e:
-            print(traceback.format_exc())
+            logger.exception('User creation failed')
             return Response({'success': False, 'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
@@ -2451,18 +2422,31 @@ class UserListAPIView(APIView):
 
 class UserGroupListAPIView(APIView):
     def get(self, request):
-        groups = Group.objects.all().values('id', 'name')
+        from .services import ensure_module_registry_seeded
+
+        ensure_module_registry_seeded()
+        groups = Group.objects.all().order_by('name').values('id', 'name')
         return Response(list(groups))
     
     
     
 class GroupModulesAPIView(APIView):
     def get(self, request, group_id):
+        from .services import ensure_module_registry_seeded
+
+        ensure_module_registry_seeded()
         try:
             group = Group.objects.get(id=group_id)
-            modules = Module.objects.filter(groups=group)
+            modules = Module.objects.filter(groups=group).order_by('id')
             data = [
-                {"id": m.id, "name": m.name, "menu_title": m.menu_title, "headings": m.headings}
+                {
+                    "id": m.id,
+                    "name": m.name,
+                    "menu_title": m.menu_title,
+                    "headings": m.headings or [],
+                    "all_headings": m.headings or [],
+                    "file_name": m.html_file or "",
+                }
                 for m in modules
             ]
             return Response({"success": True, "modules": data})
@@ -2473,6 +2457,13 @@ class GroupModulesAPIView(APIView):
 @api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])
 def user_allowed_modules(request):
+    from .services import (
+        get_user_allowed_module_payload,
+        invalidate_user_modules_cache,
+        is_admin_user,
+        sync_user_module_provisions_from_group,
+    )
+
     user = request.user
     if not user.is_authenticated:
         return {'allowed_modules': []}
@@ -2491,6 +2482,9 @@ def user_allowed_modules(request):
             if not isinstance(modules, list):
                 return Response({'success': False, 'error': 'Modules should be a list.'}, status=400)
 
+            if sync_user_module_provisions_from_group(user):
+                return Response({'success': True, 'message': 'Modules auto-assigned from user category.'})
+
             UserModuleProvision.objects.filter(user=user).delete()
             # Example: in your API view for saving user module provisions
             for mod in modules:
@@ -2502,6 +2496,7 @@ def user_allowed_modules(request):
                         'file_name': mod.get('file_name', '')
                     }
                 )
+            invalidate_user_modules_cache(user.id)
             return Response({'success': True, 'message': 'Modules saved successfully.'})
         except Exception as e:
             return Response({'success': False, 'error': str(e)}, status=500)
@@ -2513,15 +2508,7 @@ def user_allowed_modules(request):
     requested_user_id = request.GET.get('user_id')
     
     # Permission check for fetching other users
-    is_admin = (
-        user.is_superuser
-        or user.groups.filter(name__iexact="Admin").exists()
-        or (
-            hasattr(user, 'userprofile')
-            and user.userprofile.department
-            and user.userprofile.department.name.lower() == "admin"
-        )
-    )
+    is_admin = is_admin_user(user)
 
     if requested_user_id and is_admin:
         try:
@@ -2529,25 +2516,7 @@ def user_allowed_modules(request):
         except User.DoesNotExist:
             return Response({'allowed_modules': []}, status=404)
 
-    # 1. If target is Admin/Superuser -> Full Access
-    # (We check target_user properties here)
-    if (
-        target_user.is_superuser
-        or target_user.groups.filter(name__iexact="Admin").exists()
-        or (
-            hasattr(target_user, 'userprofile')
-            and target_user.userprofile.department
-            and target_user.userprofile.department.name.lower() == "admin"
-        )
-    ):
-        all_modules = Module.objects.all()
-        modules = [{"name": mod.name, "headings": mod.headings} for mod in all_modules]
-        return Response({"modules": modules})
-
-    # 2. Normal users: use UserModuleProvision for target_user
-    provisions = UserModuleProvision.objects.filter(user=target_user)
-    modules = [{"name": p.module_name, "headings": p.headings} for p in provisions]
-    return Response({"modules": modules})
+    return Response({"modules": get_user_allowed_module_payload(target_user)})
 
 
 
@@ -2619,6 +2588,8 @@ class UserDetailAPIView(APIView):
             return Response({"error": "User not found"}, status=404)
 
     def put(self, request, user_id):
+        from .services import invalidate_user_modules_cache, sync_user_module_provisions_from_group
+
         try:
             user = User.objects.get(id=user_id)
             data = request.data
@@ -2653,6 +2624,8 @@ class UserDetailAPIView(APIView):
                 if group:
                     user.groups.clear()
                     user.groups.add(group)
+                    if not sync_user_module_provisions_from_group(user):
+                        invalidate_user_modules_cache(user.id)
 
             return Response({'success': True, 'message': 'User updated successfully.'})
         except User.DoesNotExist:

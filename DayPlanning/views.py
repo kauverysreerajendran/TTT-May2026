@@ -1473,6 +1473,7 @@ class DayPlanningPickTableAPIView(APIView):
         # Convert page_obj to list of dicts
         master_data = list(page_obj.object_list.values(
             'batch_id',
+            'lot_id',
             'date_time',
             'model_stock_no__model_no',
             'plating_color',

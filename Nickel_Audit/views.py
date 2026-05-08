@@ -84,6 +84,116 @@ def _na_normalize_active_trays(rows):
     return sorted(clean_rows, key=lambda item: (not item['is_top'], _na_tray_sort_key(item['tray_id'])))
 
 
+def _na_upsert_accepted_tray_store(lot_id, tray_id, qty, user):
+    tid = str(tray_id or '').strip()
+    tray_qty = _na_int(qty)
+    if not tid or tray_qty <= 0:
+        return None
+    return Nickel_Audit_Accepted_TrayID_Store.objects.update_or_create(
+        tray_id=tid,
+        defaults={
+            'lot_id': lot_id,
+            'tray_qty': tray_qty,
+            'user': user,
+            'is_save': True,
+            'is_draft': False,
+        },
+    )
+
+
+def _na_normalize_source_lot_id(raw_lot_id):
+    lot_id = str(raw_lot_id or '').strip()
+    if '-' in lot_id:
+        return lot_id.rsplit('-', 1)[-1]
+    return lot_id
+
+
+def _na_source_lot_ids(jig_unload_obj):
+    source_lots = []
+    for raw_lot_id in jig_unload_obj.combine_lot_ids or []:
+        lot_id = _na_normalize_source_lot_id(raw_lot_id)
+        if lot_id:
+            source_lots.append(lot_id)
+    return source_lots or [jig_unload_obj.lot_id]
+
+
+def _na_completed_filter_q():
+    return (
+        Q(na_qc_accptance=True)
+        | Q(na_qc_rejection=True)
+        | Q(na_qc_few_cases_accptance=True, na_onhold_picking=False)
+    )
+
+
+def _na_completed_source_lot_ids(allowed_color_ids):
+    completed_sources = set()
+    completed_rows = (
+        JigUnloadAfterTable.objects.filter(
+            total_case_qty__gt=0,
+            plating_color_id__in=allowed_color_ids,
+        )
+        .filter(_na_completed_filter_q())
+        .only('lot_id', 'combine_lot_ids')
+    )
+    for completed_row in completed_rows:
+        completed_sources.update(_na_source_lot_ids(completed_row))
+    return completed_sources
+
+
+def _na_active_pick_rows(queryset, completed_source_lots, zone_label):
+    active_rows = []
+    seen_source_lots = set()
+    input_count = 0
+    direct_submission_excluded = 0
+    completed_source_excluded = 0
+    duplicate_source_excluded = 0
+
+    for jig_unload_obj in queryset:
+        input_count += 1
+        source_lots = _na_source_lot_ids(jig_unload_obj)
+        if getattr(jig_unload_obj, 'has_submission', False):
+            direct_submission_excluded += 1
+            logger.info(
+                "[AUDIT_PICKTABLE_FILTER] zone=%s exclude lot=%s sources=%s reason=direct_submission",
+                zone_label,
+                jig_unload_obj.lot_id,
+                source_lots,
+            )
+            continue
+        if any(lot_id in completed_source_lots for lot_id in source_lots):
+            completed_source_excluded += 1
+            logger.info(
+                "[AUDIT_PICKTABLE_FILTER] zone=%s exclude lot=%s sources=%s reason=completed_source",
+                zone_label,
+                jig_unload_obj.lot_id,
+                source_lots,
+            )
+            continue
+        if any(lot_id in seen_source_lots for lot_id in source_lots):
+            duplicate_source_excluded += 1
+            logger.info(
+                "[AUDIT_PICKTABLE_FILTER] zone=%s exclude lot=%s sources=%s reason=duplicate_source",
+                zone_label,
+                jig_unload_obj.lot_id,
+                source_lots,
+            )
+            continue
+        active_rows.append(jig_unload_obj)
+        seen_source_lots.update(source_lots)
+
+    logger.info(
+        "[AUDIT_PICKTABLE_FILTER] zone=%s input=%d output=%d direct_submission_excluded=%d completed_source_excluded=%d duplicate_source_excluded=%d completed_sources=%d",
+        zone_label,
+        input_count,
+        len(active_rows),
+        direct_submission_excluded,
+        completed_source_excluded,
+        duplicate_source_excluded,
+        len(completed_source_lots),
+    )
+    return active_rows
+
+
 class NA_PickTableView(APIView):
     renderer_classes = [TemplateHTMLRenderer]
     template_name = 'Nickel_Audit/NickelAudit_PickTable.html'
@@ -126,11 +236,16 @@ class NA_PickTableView(APIView):
             lot_id=OuterRef('lot_id')
         ).values('total_rejection_quantity')[:1]
 
+        has_submission_subquery = Exists(
+            NickelAudit_Submission.objects.filter(lot_id=OuterRef('lot_id'))
+        )
+
         # ✅ Annotate with additional fields
         queryset = queryset.annotate(
             has_draft=has_draft_subquery,
             draft_type=draft_type_subquery,
             brass_rejection_total_qty=brass_rejection_qty_subquery,
+            has_submission=has_submission_subquery,
         )
 
         # ✅ UPDATED: Filter logic using JigUnloadAfterTable fields
@@ -153,11 +268,12 @@ class NA_PickTableView(APIView):
             Q(na_qc_rejection=True, na_onhold_picking=True)
         ).distinct().order_by('-nq_last_process_date_time', '-lot_id')
 
-        print("All lot_ids in queryset:", list(queryset.values_list('lot_id', flat=True)))
+        completed_source_lots = _na_completed_source_lot_ids(allowed_color_ids)
+        pick_rows = _na_active_pick_rows(queryset, completed_source_lots, 'Z1')
 
         # Pagination
         page_number = request.GET.get('page', 1)
-        paginator = Paginator(queryset, 10)
+        paginator = Paginator(pick_rows, 10)
         page_obj = paginator.get_page(page_number)
 
         # ✅ UPDATED: Get values from JigUnloadAfterTable
@@ -175,7 +291,9 @@ class NA_PickTableView(APIView):
                 'vendor_internal': '',  # Not available in JigUnloadAfterTable
                 'location__location_name': _get_input_source(jig_unload_obj),
                 'tray_type': get_model_master_tray_info(jig_unload_obj.plating_stk_no, jig_unload_obj.tray_type or '')[0],
-                'tray_capacity': get_model_master_tray_info(jig_unload_obj.plating_stk_no, jig_unload_obj.tray_type or '', jig_unload_obj.tray_capacity or 0)[1],
+                'tray_capacity': _na_tray_capacity(
+                    get_model_master_tray_info(jig_unload_obj.plating_stk_no, jig_unload_obj.tray_type or '')[0]
+                ) or _na_tray_capacity(jig_unload_obj.tray_type or '') or jig_unload_obj.tray_capacity or 0,
                 'wiping_required': False,  # Default value, can be enhanced later
                 'brass_audit_rejection': False,  # Not applicable for nickel IP
                 
@@ -331,8 +449,11 @@ class NA_PickTableView(APIView):
                 data['aql_limit'] = None
                 data['sample_qty'] = None
 
-        print(f"[DEBUG] Master data loaded with {len(master_data)} entries from JigUnloadAfterTable.")
-        print("All lot_ids in processed data:", [data['stock_lot_id'] for data in master_data])
+        logger.info(
+            "[AUDIT_PICKTABLE_FILTER] zone=Z1 page_rows=%d lot_ids=%s",
+            len(master_data),
+            [data['stock_lot_id'] for data in master_data],
+        )
         
         context = {
             'master_data': master_data,
@@ -355,7 +476,7 @@ def _na_tray_capacity(tray_type_name):
     if not tray_type_name:
         return 0
     name = tray_type_name.strip().lower()
-    if name.startswith('nr') or name.startswith('nb') or name in ['normal', 'normal tray']:
+    if name.startswith('nr') or name.startswith('nb') or name.startswith('nd') or name in ['normal', 'normal tray']:
         return 20
     if name.startswith('jb') or 'jumbo' in name:
         return 12
@@ -424,7 +545,20 @@ def na_action(request):
         if not tray_id_val:
             return Response({'success': False, 'valid': False, 'message': 'Tray ID required'})
         exists = TrayMaster.objects.filter(tray_id__iexact=tray_id_val).exists()
-        return Response({'success': True, 'valid': exists, 'message': 'Valid tray' if exists else 'Tray not found in master'})
+        if not exists:
+            return Response({'success': True, 'valid': False, 'message': 'Tray not found in master'})
+        is_occupied = (
+            IPTrayId.objects.filter(tray_id__iexact=tray_id_val, delink_tray=False, rejected_tray=False).exists()
+            or BrassTrayId.objects.filter(tray_id__iexact=tray_id_val, delink_tray=False, rejected_tray=False).exists()
+            or BrassAuditTrayId.objects.filter(tray_id__iexact=tray_id_val, delink_tray=False, rejected_tray=False).exists()
+            or IQFTrayId.objects.filter(tray_id__iexact=tray_id_val, delink_tray=False, rejected_tray=False).exists()
+            or NickelQcTrayId.objects.filter(tray_id__iexact=tray_id_val, delink_tray=False, rejected_tray=False).exists()
+            or Nickel_AuditTrayId.objects.filter(tray_id__iexact=tray_id_val, delink_tray=False, rejected_tray=False).exists()
+            or JigUnload_TrayId.objects.filter(tray_id__iexact=tray_id_val, delink_tray=False, rejected_tray=False).exists()
+        )
+        if is_occupied:
+            return Response({'success': True, 'valid': False, 'message': 'Tray id already occupied'})
+        return Response({'success': True, 'valid': True, 'message': 'Valid tray'})
     if not lot_id:
         return Response({'success': False, 'error': 'lot_id required'}, status=400)
     juat = JigUnloadAfterTable.objects.filter(lot_id=lot_id).first()
@@ -480,6 +614,14 @@ def na_action(request):
                     trays = []
         tray_type = (juat.tray_type or '').strip()
         tray_cap = _na_tray_capacity(tray_type) or juat.tray_capacity or 20
+        logger.info(
+            "[AUDIT_TRAY_DISTRIBUTION] action=GET_TRAYS lot=%s trays=%d total_qty=%s accept_cap=%s tray_type=%s",
+            lot_id,
+            len(trays),
+            juat.nq_qc_accepted_qty or juat.total_case_qty or 0,
+            tray_cap,
+            tray_type,
+        )
         return Response({
             'success': True,
             'trays': trays,
@@ -527,30 +669,46 @@ def na_action(request):
                 ])
         reuse_trays = []
         auto_delink_tray_ids = []
+        accept_auto_trays = []
         remaining_rej = rejected_qty
         for t in orig_trays:
             if remaining_rej <= 0:
-                break
-            if t['qty'] <= remaining_rej:
+                accept_auto_trays.append({'tray_id': t['tray_id'], 'qty': t['qty']})
+            elif t['qty'] <= remaining_rej:
                 auto_delink_tray_ids.append(t['tray_id'])
                 remaining_rej -= t['qty']
             else:
+                accept_auto_trays.append({'tray_id': t['tray_id'], 'qty': t['qty'] - remaining_rej})
                 remaining_rej = 0
+
         reject_slots = []
         rem_rej = rejected_qty
         while rem_rej > 0:
             slot_qty = min(rem_rej, rej_cap)
             reject_slots.append({'qty': slot_qty, 'is_top': False})
             rem_rej -= slot_qty
-        accept_slots = []
-        if accepted_qty > 0:
-            rem_acc = accepted_qty
-            first = True
-            while rem_acc > 0:
-                slot_qty = min(rem_acc, orig_cap)
-                accept_slots.append({'qty': slot_qty, 'is_top': first})
-                first = False
-                rem_acc -= slot_qty
+        accept_slots = [
+            {'qty': t['qty'], 'is_top': i == 0}
+            for i, t in enumerate(accept_auto_trays)
+            if t['qty'] > 0
+        ]
+        remaining_accept_qty = accepted_qty - sum(slot['qty'] for slot in accept_slots)
+        while remaining_accept_qty > 0:
+            slot_qty = min(remaining_accept_qty, orig_cap)
+            accept_slots.append({'qty': slot_qty, 'is_top': not accept_slots})
+            remaining_accept_qty -= slot_qty
+        logger.info(
+            "[AUDIT_TRAY_DISTRIBUTION] action=ALLOCATE lot=%s total=%d rejected=%d accepted=%d accept_cap=%d reject_cap=%d accept_slots=%s reject_slots=%s auto_delink=%s",
+            lot_id,
+            total_qty,
+            rejected_qty,
+            accepted_qty,
+            orig_cap,
+            rej_cap,
+            accept_slots,
+            reject_slots,
+            auto_delink_tray_ids,
+        )
         return Response({
             'success': True,
             'accepted_qty': accepted_qty,
@@ -558,6 +716,7 @@ def na_action(request):
             'accept_slots': accept_slots,
             'reject_slots': reject_slots,
             'original_trays': orig_trays,
+            'accept_auto_trays': accept_auto_trays,
             'reuse_count': len(reuse_trays),
             'reuse_trays': reuse_trays,
             'auto_delink_tray_ids': auto_delink_tray_ids,
@@ -582,6 +741,28 @@ def na_action(request):
         except Exception as e:
             logger.exception("[na_action FULL_ACCEPT] lot=%s", lot_id)
             return Response({'success': False, 'error': str(e)}, status=500)
+    if action == 'SAVE_DRAFT':
+        draft_data = request.data.get('draft_data', {})
+        with transaction.atomic():
+            Nickel_Audit_Draft_Store.objects.update_or_create(
+                lot_id=lot_id,
+                defaults={
+                    'batch_id': juat.unload_lot_id or lot_id,
+                    'user': request.user,
+                    'draft_type': 'batch_rejection',
+                    'draft_data': draft_data,
+                },
+            )
+            juat.na_draft = True
+            juat.na_onhold_picking = True
+            juat.save(update_fields=['na_draft', 'na_onhold_picking'])
+        logger.info("[AUDIT_SUBMISSION] action=SAVE_DRAFT lot=%s user=%s", lot_id, request.user)
+        return Response({'success': True})
+    if action == 'GET_DRAFT':
+        draft = Nickel_Audit_Draft_Store.objects.filter(lot_id=lot_id).first()
+        if draft:
+            return Response({'success': True, 'has_draft': True, 'draft_data': draft.draft_data})
+        return Response({'success': True, 'has_draft': False, 'draft_data': {}})
     return Response({'success': False, 'error': f'Unknown action: {action}'}, status=400)
 
 
@@ -590,6 +771,7 @@ def _na_do_full_accept(request, lot_id, juat):
     from django.db import transaction
     import django.utils.timezone as tz
     total_qty = juat.nq_qc_accepted_qty or juat.total_case_qty or 0
+    accept_cap = _na_tray_capacity(juat.tray_type or '') or juat.tray_capacity or 20
     trays_qs = Nickel_AuditTrayId.objects.filter(
         lot_id=lot_id, rejected_tray=False, delink_tray=False
     ).order_by('tray_id')
@@ -620,14 +802,10 @@ def _na_do_full_accept(request, lot_id, juat):
                     'tray_quantity': at['qty'],
                     'top_tray': at['is_top'],
                     'tray_type': juat.tray_type or '',
-                    'tray_capacity': juat.tray_capacity or 20,
+                    'tray_capacity': accept_cap,
                 },
             )
-            Nickel_Audit_Accepted_TrayID_Store.objects.update_or_create(
-                lot_id=lot_id,
-                tray_id=tid,
-                defaults={'tray_qty': at['qty'], 'user': request.user},
-            )
+            _na_upsert_accepted_tray_store(lot_id, tid, at['qty'], request.user)
         NickelAudit_Submission.objects.create(
             lot_id=lot_id,
             submission_type='FULL_ACCEPT',
@@ -645,7 +823,8 @@ def _na_do_full_accept(request, lot_id, juat):
             'na_qc_accptance', 'na_qc_accepted_qty',
             'na_last_process_date_time', 'last_process_module',
         ])
-    logger.info("[na_full_accept] lot=%s user=%s qty=%d", lot_id, request.user, total_qty)
+    logger.info("[AUDIT_ACCEPT_FLOW] action=FULL_ACCEPT lot=%s user=%s qty=%d trays=%d", lot_id, request.user, total_qty, len(trays))
+    logger.info("[AUDIT_SUBMISSION] lot=%s submission=FULL_ACCEPT accepted=%d rejected=0", lot_id, total_qty)
     return Response({'success': True})
 
 
@@ -661,9 +840,24 @@ def _na_do_submit_reject(request, lot_id, juat):
     if not reason_ids or rejected_qty <= 0:
         return Response({'success': False, 'error': 'reason_ids and rejected_qty required'}, status=400)
     total_qty = juat.nq_qc_accepted_qty or juat.total_case_qty or 0
+    if rejected_qty > total_qty:
+        return Response({'success': False, 'error': 'Rejected qty cannot exceed total qty'}, status=400)
     accepted_qty = total_qty - rejected_qty
     is_partial = accepted_qty > 0
+    reject_qty_sum = sum(int(rt.get('qty', 0) or 0) for rt in reject_trays)
+    accept_qty_sum = sum(int(at.get('qty', 0) or 0) for at in accept_trays)
+    if reject_qty_sum != rejected_qty:
+        return Response(
+            {'success': False, 'error': f'Reject tray qty total {reject_qty_sum} must equal rejected qty {rejected_qty}'},
+            status=400,
+        )
+    if accept_qty_sum != accepted_qty:
+        return Response(
+            {'success': False, 'error': f'Accept tray qty total {accept_qty_sum} must equal accepted qty {accepted_qty}'},
+            status=400,
+        )
     tray_type = (juat.tray_type or '').strip().lower()
+    accept_cap = _na_tray_capacity(juat.tray_type or '') or juat.tray_capacity or 20
     if tray_type.startswith('jb') or 'jumbo' in tray_type:
         allowed_prefix = 'JB'
         rej_cap = 12
@@ -682,6 +876,25 @@ def _na_do_submit_reject(request, lot_id, juat):
                 {'success': False, 'error': f'Reject tray {tid} qty exceeds max {rej_cap}'},
                 status=400,
             )
+    for at in accept_trays:
+        tid = (at.get('tray_id') or '').strip().upper()
+        qty = int(at.get('qty', 0) or 0)
+        if qty > accept_cap:
+            return Response(
+                {'success': False, 'error': f'Accept tray {tid} qty exceeds max {accept_cap}'},
+                status=400,
+            )
+    logger.info(
+        "[AUDIT_REJECT_FLOW] lot=%s total=%d rejected=%d accepted=%d accept_cap=%d reject_cap=%d reject_trays=%s accept_trays=%s",
+        lot_id,
+        total_qty,
+        rejected_qty,
+        accepted_qty,
+        accept_cap,
+        rej_cap,
+        reject_trays,
+        accept_trays,
+    )
     with transaction.atomic():
         reasons_qs = Nickel_Audit_Rejection_Table.objects.filter(id__in=reason_ids)
         reason_store, _ = Nickel_Audit_Rejection_ReasonStore.objects.update_or_create(
@@ -720,7 +933,7 @@ def _na_do_submit_reject(request, lot_id, juat):
                         'tray_quantity': t['tray_quantity'] or 0,
                         'top_tray': t.get('top_tray', False),
                         'tray_type': juat.tray_type or '',
-                        'tray_capacity': juat.tray_capacity or 20,
+                        'tray_capacity': accept_cap,
                     },
                 )
         orig_trays_qs = Nickel_AuditTrayId.objects.filter(lot_id=lot_id, rejected_tray=False)
@@ -750,18 +963,14 @@ def _na_do_submit_reject(request, lot_id, juat):
                 tray_quantity=qty,
                 top_tray=bool(at.get('is_top', False)),
                 tray_type=juat.tray_type or '',
-                tray_capacity=juat.tray_capacity or 20,
+                tray_capacity=accept_cap,
             )
         for at in accept_trays:
             tid = (at.get('tray_id') or '').strip()
             qty = int(at.get('qty', 0))
             if not tid or qty <= 0:
                 continue
-            Nickel_Audit_Accepted_TrayID_Store.objects.update_or_create(
-                lot_id=lot_id,
-                tray_id=tid,
-                defaults={'tray_qty': qty, 'user': request.user},
-            )
+            _na_upsert_accepted_tray_store(lot_id, tid, qty, request.user)
         import django.utils.timezone as tz
         juat.na_qc_rejection = not is_partial
         juat.na_qc_few_cases_accptance = is_partial
@@ -785,6 +994,14 @@ def _na_do_submit_reject(request, lot_id, juat):
             reject_trays_data=reject_trays,
             created_by=request.user,
         )
+        logger.info(
+            "[AUDIT_SUBMISSION] lot=%s submission=%s total=%d accepted=%d rejected=%d",
+            lot_id,
+            submission_type,
+            total_qty,
+            accepted_qty,
+            rejected_qty,
+        )
         if is_partial:
             child_juat = JigUnloadAfterTable(
                 jig_qr_id=juat.jig_qr_id or '',
@@ -800,7 +1017,7 @@ def _na_do_submit_reject(request, lot_id, juat):
                 version_list=juat.version_list or [],
                 category=juat.category or '',
                 tray_type=juat.tray_type or '',
-                tray_capacity=juat.tray_capacity,
+                tray_capacity=accept_cap,
                 nq_qc_accptance=True,
                 nq_qc_accepted_qty=accepted_qty,
                 na_qc_accptance=True,
@@ -820,7 +1037,7 @@ def _na_do_submit_reject(request, lot_id, juat):
                             'tray_quantity': qty,
                             'top_tray': bool(at.get('is_top', False)),
                             'tray_type': juat.tray_type or '',
-                            'tray_capacity': juat.tray_capacity or 20,
+                            'tray_capacity': accept_cap,
                         },
                     )
             NickelAudit_PartialAcceptLot.objects.create(
@@ -842,7 +1059,7 @@ def _na_do_submit_reject(request, lot_id, juat):
                 created_by=request.user,
             )
     logger.info(
-        "[na_submit_reject] lot=%s rej_qty=%d partial=%s user=%s",
+        "[AUDIT_REJECT_FLOW] action=SUBMIT_REJECT lot=%s rej_qty=%d partial=%s user=%s",
         lot_id, rejected_qty, is_partial, request.user,
     )
     return Response({'success': True, 'is_partial': is_partial})
@@ -855,6 +1072,7 @@ def _na_do_submit_accept(request, lot_id, juat):
     accept_trays = request.data.get('accept_trays', [])
     if not accept_trays:
         return Response({'success': False, 'error': 'accept_trays required'}, status=400)
+    accept_cap = _na_tray_capacity(juat.tray_type or '') or juat.tray_capacity or 20
     with transaction.atomic():
         for at in accept_trays:
             tid = (at.get('tray_id') or '').strip()
@@ -868,14 +1086,10 @@ def _na_do_submit_accept(request, lot_id, juat):
                     'tray_quantity': qty,
                     'top_tray': bool(at.get('is_top', False)),
                     'tray_type': juat.tray_type or '',
-                    'tray_capacity': juat.tray_capacity or 20,
+                    'tray_capacity': accept_cap,
                 },
             )
-            Nickel_Audit_Accepted_TrayID_Store.objects.update_or_create(
-                lot_id=lot_id,
-                tray_id=tid,
-                defaults={'tray_qty': qty, 'user': request.user},
-            )
+            _na_upsert_accepted_tray_store(lot_id, tid, qty, request.user)
         total_qty = juat.nq_qc_accepted_qty or juat.total_case_qty or 0
         juat.na_qc_accptance = True
         juat.na_qc_accepted_qty = total_qty
@@ -885,7 +1099,8 @@ def _na_do_submit_accept(request, lot_id, juat):
             'na_qc_accptance', 'na_qc_accepted_qty',
             'na_last_process_date_time', 'last_process_module',
         ])
-    logger.info("[na_submit_accept] lot=%s user=%s", lot_id, request.user)
+    logger.info("[AUDIT_ACCEPT_FLOW] action=SUBMIT_ACCEPT lot=%s user=%s trays=%d", lot_id, request.user, len(accept_trays))
+    logger.info("[AUDIT_SUBMISSION] lot=%s submission=SUBMIT_ACCEPT accepted=%d", lot_id, juat.total_case_qty or 0)
     return Response({'success': True})
 
 
@@ -911,7 +1126,7 @@ def na_delink_selected_trays(request):
                 )
                 updated += freed
                 lots_processed += 1
-        logger.info("[na_delink_selected_trays] user=%s lots=%s freed=%d", request.user, stock_lot_ids, updated)
+        logger.info("[AUDIT_DELINK_FLOW] user=%s lots=%s freed=%d processed=%d", request.user, stock_lot_ids, updated, lots_processed)
         return Response({'success': True, 'updated': updated, 'lots_processed': lots_processed})
     except Exception as e:
         logger.exception("[na_delink_selected_trays] error")

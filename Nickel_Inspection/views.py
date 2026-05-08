@@ -45,7 +45,7 @@ def _nq_tray_capacity(tray_type_name):
     if not tray_type_name:
         return 0
     name = tray_type_name.strip().lower()
-    if name.startswith('nr') or name.startswith('nb') or name in ['normal', 'normal tray']:
+    if name.startswith('nr') or name.startswith('nb') or name.startswith('nd') or name in ['normal', 'normal tray']:
         return 20
     if name.startswith('jb') or 'jumbo' in name:
         return 12
@@ -94,6 +94,22 @@ def _nq_normalize_tray_snapshot(rows, rejected=False):
     for item in clean_rows:
         item['top_tray'] = item['tray_id'] == top_row['tray_id']
     return sorted(clean_rows, key=lambda item: (not item['top_tray'], _nq_tray_sort_key(item['tray_id'])))
+
+def _nq_upsert_accepted_tray_store(lot_id, tray_id, qty, user):
+    tid = str(tray_id or '').strip()
+    tray_qty = _nq_int(qty)
+    if not tid or tray_qty <= 0:
+        return None
+    return Nickel_Qc_Accepted_TrayID_Store.objects.update_or_create(
+        tray_id=tid,
+        defaults={
+            'lot_id': lot_id,
+            'tray_qty': tray_qty,
+            'user': user,
+            'is_save': True,
+            'is_draft': False,
+        },
+    )
 
 def _get_input_source(jig_unload_obj):
     """Return location names with fallback chain: M2M → TotalStockModel → TrayId → ModelMasterCreation."""
@@ -147,7 +163,7 @@ class NQ_PickTableView(APIView):
                 plating_color_id__in=allowed_color_ids,  # Only show records for zone 1
             )
         )
-        # ✅ Add draft status subqueries for Nickel QC
+            # ✅ Add draft status subqueries for Nickel QC
         has_draft_subquery = Exists(
             Nickel_QC_Draft_Store.objects.filter(
                 lot_id=OuterRef("lot_id")  # Using the auto-generated lot_id
@@ -174,12 +190,14 @@ class NQ_PickTableView(APIView):
                 &
                 # Exclude few cases acceptance with no hold
                 ~Q(nq_qc_few_cases_accptance=True, nq_onhold_picking=False)
-                &
+            )
+            &
+            (
                 # Must be coming from jig unload (basic requirement)
                 Q(total_case_qty__gt=0)
+                | Q(send_to_nickel_brass=True)  # Explicitly sent to nickel IP
+                | Q(rejected_nickle_ip_stock=True, nq_onhold_picking=True)  # Rejected but on hold
             )
-            | Q(send_to_nickel_brass=True)  # Explicitly sent to nickel IP
-            | Q(rejected_nickle_ip_stock=True, nq_onhold_picking=True)  # Rejected but on hold
         ).order_by("-created_at", "-lot_id")
         print("All lot_ids in queryset:", list(queryset.values_list("lot_id", flat=True)))
         # Pagination
@@ -885,11 +903,7 @@ def _nq_do_full_accept(request, lot_id, juat):
                     'tray_capacity': juat.tray_capacity or 20,
                 },
             )
-            Nickel_Qc_Accepted_TrayID_Store.objects.update_or_create(
-                lot_id=lot_id,
-                tray_id=tid,
-                defaults={'tray_qty': at['qty'], 'user': request.user},
-            )
+            _nq_upsert_accepted_tray_store(lot_id, tid, at['qty'], request.user)
         NickelQC_Submission.objects.create(
             lot_id=lot_id,
             submission_type='FULL_ACCEPT',
@@ -1051,11 +1065,7 @@ def _nq_do_submit_reject(request, lot_id, juat):
             qty = int(at.get('qty', 0))
             if not tid or qty <= 0:
                 continue
-            Nickel_Qc_Accepted_TrayID_Store.objects.update_or_create(
-                lot_id=lot_id,
-                tray_id=tid,
-                defaults={'tray_qty': qty, 'user': request.user},
-            )
+            _nq_upsert_accepted_tray_store(lot_id, tid, qty, request.user)
         # Update JigUnloadAfterTable flags
         import django.utils.timezone as tz
         juat.nq_qc_rejection = not is_partial
@@ -1211,11 +1221,7 @@ def _nq_do_submit_accept(request, lot_id, juat):
                     'tray_capacity': juat.tray_capacity or 20,
                 },
             )
-            Nickel_Qc_Accepted_TrayID_Store.objects.update_or_create(
-                lot_id=lot_id,
-                tray_id=tid,
-                defaults={'tray_qty': qty, 'user': request.user},
-            )
+            _nq_upsert_accepted_tray_store(lot_id, tid, qty, request.user)
         juat.nq_qc_accptance = True
         juat.nq_qc_accepted_qty = juat.total_case_qty
         juat.nq_last_process_date_time = tz.now()

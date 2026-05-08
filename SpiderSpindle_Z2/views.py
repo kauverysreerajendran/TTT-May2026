@@ -139,6 +139,10 @@ def _get_model_images(jig_unload_obj):
     return images
 
 
+def _split_tray_ids(tray_id_value):
+    return [tray_id.strip() for tray_id in str(tray_id_value or '').split(',') if tray_id.strip()]
+
+
 @method_decorator(login_required, name='dispatch')
 class SSZ2PickTableView(APIView):
     """Spider Spindle Zone 2 Pick Table — other colors."""
@@ -251,9 +255,14 @@ class SSZ2CompletedView(APIView):
         paginator = Paginator(queryset, 10)
         page_obj = paginator.get_page(page_number)
 
+        page_lot_ids = [obj.lot_id for obj in page_obj.object_list]
+        linked_tray_map = {}
+        for tray in SpiderSpindleZ2TrayId.objects.filter(lot_id__in=page_lot_ids).order_by('linked_at', 'id'):
+            linked_tray_map.setdefault(tray.lot_id, []).append(tray.tray_id)
+
         master_data = []
         for obj in page_obj.object_list:
-            linked_tray = SpiderSpindleZ2TrayId.objects.filter(lot_id=obj.lot_id).first()
+            linked_tray_ids = linked_tray_map.get(obj.lot_id) or _split_tray_ids(obj.ss_z2_tray_id)
             images = _get_model_images(obj)
             data = {
                 'lot_id': obj.lot_id,
@@ -269,7 +278,9 @@ class SSZ2CompletedView(APIView):
                 'plating_stk_no': obj.plating_stk_no or '',
                 'polishing_stk_no': obj.polish_stk_no or '',
                 'category': obj.category or '',
-                'linked_tray_id': linked_tray.tray_id if linked_tray else obj.ss_z2_tray_id or '',
+                'linked_tray_id': ', '.join(linked_tray_ids),
+                'linked_tray_ids': linked_tray_ids,
+                'linked_tray_count': len(linked_tray_ids),
                 'spider_pick_remarks': obj.spider_pick_remarks or '',
                 'images': images,
             }
