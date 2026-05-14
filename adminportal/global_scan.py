@@ -117,6 +117,43 @@ class GlobalTraySearchView(LoginRequiredMixin, View):
             query |= Q(**{f'{field_name}__iexact': candidate})
         return query
 
+    def _tray_id_in_payload(self, payload, variants):
+        variant_set = {str(value or '').upper() for value in variants if value}
+        if not payload or not variant_set:
+            return False
+
+        def _iter_entries(value):
+            if isinstance(value, list):
+                for item in value:
+                    yield item
+            elif isinstance(value, dict):
+                yield value
+
+        for entry in _iter_entries(payload):
+            if not isinstance(entry, dict):
+                continue
+            tray_value = entry.get('tray_id') or entry.get('trayId') or entry.get('id')
+            if tray_value and ''.join(str(tray_value).split()).upper() in variant_set:
+                return True
+        return False
+
+    def _add_jig_unload_candidate_lots(self, lot_ids, submitted_record):
+        if not submitted_record:
+            return
+        if submitted_record.lot_id:
+            lot_ids.add(str(submitted_record.lot_id))
+            return
+
+        try:
+            from Jig_Loading.models import JigCompleted
+            jig = JigCompleted.objects.filter(id=submitted_record.jig_completed_id).first()
+            if not jig:
+                return
+            if jig.lot_id:
+                lot_ids.add(str(jig.lot_id))
+        except Exception as e:
+            logger.debug('%s Jig Unloading submitted candidate expansion failed: %s', SCAN_TAG, e)
+
     def _resolve_candidate_lot_ids(self, tray_id, user=None):
         """LOT-FIRST RESOLVER: Scan EVERY tray table to discover all lot_ids
         that this tray belongs to (currently or historically).
@@ -197,9 +234,14 @@ class GlobalTraySearchView(LoginRequiredMixin, View):
 
         # ?? Input Screening tray tables ??
         try:
-            from InputScreening.models import IPTrayId, IP_Accepted_TrayID_Store
+            from InputScreening.models import IPTrayId, IP_Accepted_TrayID_Store, IP_TrayVerificationStatus
             _safe_collect(IPTrayId.objects.filter(tray_query))
             _safe_collect(IP_Accepted_TrayID_Store.objects.filter(tray_query))
+            _safe_collect(IP_TrayVerificationStatus.objects.filter(
+                tray_query,
+                is_verified=True,
+                verification_status='pass',
+            ))
         except Exception as e:
             logger.debug('%s IS tray probe failed: %s', SCAN_TAG, e)
 
@@ -248,13 +290,12 @@ class GlobalTraySearchView(LoginRequiredMixin, View):
         try:
             from Jig_Unloading.models import JigUnload_TrayId, JUSubmittedZ1
             _safe_collect(JigUnload_TrayId.objects.filter(tray_query))
-            for candidate in tray_variants:
-                _safe_collect(
-                    JUSubmittedZ1.objects.filter(
-                        is_draft=False,
-                        tray_data__contains=[{'tray_id': candidate}],
-                    )
-                )
+            submitted_rows = JUSubmittedZ1.objects.exclude(tray_data__isnull=True).only(
+                'jig_completed_id', 'lot_id', 'tray_data', 'is_draft'
+            )
+            for submitted in submitted_rows.iterator():
+                if self._tray_id_in_payload(submitted.tray_data, tray_variants):
+                    self._add_jig_unload_candidate_lots(lot_ids, submitted)
         except Exception as e:
             logger.debug('%s Jig Unloading tray probe failed: %s', SCAN_TAG, e)
 
@@ -398,6 +439,55 @@ class GlobalTraySearchView(LoginRequiredMixin, View):
         except Exception:
             return fallback
 
+    def _jig_unload_route(self, jig):
+        draft_data = getattr(jig, 'draft_data', {}) or {}
+        plating_color = ''
+        if isinstance(draft_data, dict):
+            plating_color = draft_data.get('plating_color') or ''
+        if not plating_color:
+            stock = self._stock_for(getattr(jig, 'lot_id', None))
+            if stock and getattr(stock, 'plating_color', None):
+                plating_color = getattr(stock.plating_color, 'plating_color', '') or ''
+        if not plating_color:
+            try:
+                from modelmasterapp.models import ModelMasterCreation
+                mmc = ModelMasterCreation.objects.filter(batch_id=getattr(jig, 'batch_id', None)).first()
+                plating_color = getattr(mmc, 'plating_color', '') or ''
+            except Exception:
+                plating_color = ''
+
+        normalized_color = str(plating_color or '').upper().replace('IP-', '').strip()
+        if normalized_color == 'IPS':
+            return 'Jig Unloading', reverse('Jig_Unloading_MainTable')
+        return 'Jig Unloading Zone 2', reverse('JU_Zone_MainTable')
+
+    def _find_active_jig_unload_for_lot(self, lot_id):
+        from Jig_Loading.models import JigCompleted
+        from Jig_Unloading.models import JUSubmittedZ1
+
+        active_jigs = JigCompleted.objects.filter(last_process_module='Inprocess Inspection')
+        jig = active_jigs.filter(lot_id=lot_id).first()
+        if jig:
+            return jig
+
+        submitted = JUSubmittedZ1.objects.filter(lot_id=lot_id).order_by('-updated_at').first()
+        if submitted:
+            jig = active_jigs.filter(id=submitted.jig_completed_id).first()
+            if jig:
+                return jig
+
+        for candidate in active_jigs.only('id', 'lot_id', 'batch_id', 'draft_data'):
+            draft_data = candidate.draft_data or {}
+            if not isinstance(draft_data, dict):
+                continue
+            for item in draft_data.get('multi_model_allocation', []) or []:
+                if isinstance(item, dict) and str(item.get('lot_id') or '') == str(lot_id):
+                    return candidate
+            for item in draft_data.get('tray_data', []) or []:
+                if isinstance(item, dict) and str(item.get('source_lot_id') or '') == str(lot_id):
+                    return candidate
+        return None
+
     def _check_lot_in_jig_loading(self, lot_id):
         try:
             from Jig_Loading.models import JigCompleted
@@ -425,19 +515,18 @@ class GlobalTraySearchView(LoginRequiredMixin, View):
 
     def _check_lot_in_jig_unloading(self, lot_id):
         try:
-            from Jig_Loading.models import JigCompleted
-            jig = JigCompleted.objects.filter(
-                lot_id=lot_id,
-                last_process_module='Inprocess Inspection',
-            ).first()
+            jig = self._find_active_jig_unload_for_lot(lot_id)
             if not jig:
                 return None
             stock = self._stock_for(lot_id)
+            module_name, module_url = self._jig_unload_route(jig)
             return {
-                'module': 'Jig Unloading',
-                'url': reverse('Jig_Unloading_MainTable'),
-                'lot_id': lot_id,
-                'batch_id': self._batch_str(stock, lot_id),
+                'module': module_name,
+                'url': module_url,
+                'lot_id': jig.lot_id,
+                'stock_lot_id': lot_id,
+                'jig_completed_id': jig.id,
+                'batch_id': self._batch_str(stock, getattr(jig, 'batch_id', lot_id)),
             }
         except Exception as e:
             logger.error('%s _check_lot_in_jig_unloading: %s', SCAN_TAG, e)
@@ -499,71 +588,161 @@ class GlobalTraySearchView(LoginRequiredMixin, View):
             'batch_id': self._batch_str(stock, lot_id),
         }
 
+    @staticmethod
+    def _nickel_audit_source_lot_ids(jig_unload_obj):
+        source_lots = []
+        for raw_lot_id in getattr(jig_unload_obj, 'combine_lot_ids', None) or []:
+            source_lot = str(raw_lot_id or '').strip()
+            if '-' in source_lot:
+                source_lot = source_lot.rsplit('-', 1)[-1]
+            if source_lot:
+                source_lots.append(source_lot)
+        fallback_lot = str(getattr(jig_unload_obj, 'lot_id', '') or '').strip()
+        return source_lots or ([fallback_lot] if fallback_lot else [])
+
+    def _nickel_audit_completed_source_lot_ids(self, allowed_color_ids):
+        from Jig_Unloading.models import JigUnloadAfterTable
+
+        completed_filter = (
+            Q(na_qc_accptance=True)
+            | Q(na_qc_rejection=True)
+            | Q(na_qc_few_cases_accptance=True, na_onhold_picking=False)
+        )
+        completed_sources = set()
+        completed_rows = (
+            JigUnloadAfterTable.objects.filter(
+                total_case_qty__gt=0,
+                plating_color_id__in=allowed_color_ids,
+            )
+            .filter(completed_filter)
+            .only('lot_id', 'combine_lot_ids')
+        )
+        for completed_row in completed_rows:
+            completed_sources.update(self._nickel_audit_source_lot_ids(completed_row))
+        return completed_sources
+
+    def _check_lot_in_nickel_audit_zone(self, lot_id, zone_field, module_name, url_name):
+        from Jig_Unloading.models import JigUnloadAfterTable
+        from modelmasterapp.models import Plating_Color
+        from Nickel_Audit.models import NickelAudit_Submission
+
+        allowed_color_ids = list(
+            Plating_Color.objects.filter(**{zone_field: True}).values_list('id', flat=True)
+        )
+        active_filter = (
+            (
+                (Q(na_qc_accptance__isnull=True) | Q(na_qc_accptance=False))
+                & (Q(na_qc_rejection__isnull=True) | Q(na_qc_rejection=False))
+                & ~Q(na_qc_few_cases_accptance=True, na_onhold_picking=False)
+                & (
+                    Q(nq_qc_accptance=True)
+                    | Q(nq_qc_few_cases_accptance=True, nq_onhold_picking=False)
+                )
+            )
+            | Q(na_qc_rejection=True, na_onhold_picking=True)
+        )
+        pick_row = (
+            JigUnloadAfterTable.objects.filter(
+                lot_id=lot_id,
+                total_case_qty__gt=0,
+                plating_color_id__in=allowed_color_ids,
+            )
+            .filter(active_filter)
+            .only('lot_id', 'combine_lot_ids')
+            .first()
+        )
+        if not pick_row:
+            return None
+        if NickelAudit_Submission.objects.filter(lot_id=pick_row.lot_id).exists():
+            return None
+        completed_sources = self._nickel_audit_completed_source_lot_ids(allowed_color_ids)
+        if any(source_lot in completed_sources for source_lot in self._nickel_audit_source_lot_ids(pick_row)):
+            return None
+
+        stock = self._stock_for(lot_id)
+        return {
+            'module': module_name,
+            'url': reverse(url_name),
+            'lot_id': lot_id,
+            'batch_id': self._batch_str(stock, lot_id),
+        }
+
     def _check_lot_in_nickel_audit_z1(self, lot_id):
         try:
-            from Nickel_Inspection.models import NickelQC_Submission
-            from Nickel_Audit.models import NickelAudit_Submission
-            if not NickelQC_Submission.objects.filter(lot_id=lot_id).exists():
-                return None
-            if NickelAudit_Submission.objects.filter(lot_id=lot_id).exists():
-                return None
-            stock = self._stock_for(lot_id)
-            return {
-                'module': 'Nickel Audit',
-                'url': reverse('NA_PickTable'),
-                'lot_id': lot_id,
-                'batch_id': self._batch_str(stock, lot_id),
-            }
+            return self._check_lot_in_nickel_audit_zone(
+                lot_id,
+                zone_field='jig_unload_zone_1',
+                module_name='Nickel Audit',
+                url_name='NA_PickTable',
+            )
         except Exception as e:
             logger.error('%s _check_lot_in_nickel_audit_z1: %s', SCAN_TAG, e)
             return None
 
     def _check_lot_in_nickel_audit_z2(self, lot_id):
         try:
-            from nickel_audit_zone_two.models import NickelQcTrayId as NAZ2_Tray
-            # Z2 has no separate submission table; presence in Z2 tray table
-            # = currently active in Nickel Audit Z2.
-            if not NAZ2_Tray.objects.filter(lot_id=lot_id).exists():
-                return None
-            stock = self._stock_for(lot_id)
-            return {
-                'module': 'Nickel Audit Z2',
-                'url': reverse('NA_Zone_PickTable'),
-                'lot_id': lot_id,
-                'batch_id': self._batch_str(stock, lot_id),
-            }
+            return self._check_lot_in_nickel_audit_zone(
+                lot_id,
+                zone_field='jig_unload_zone_2',
+                module_name='Nickel Audit Z2',
+                url_name='NA_Zone_PickTable',
+            )
         except Exception as e:
             logger.error('%s _check_lot_in_nickel_audit_z2: %s', SCAN_TAG, e)
             return None
 
+    def _check_lot_in_spider_spindle_zone(self, lot_id, zone_field, completed_field, module_name, url_name):
+        from Jig_Unloading.models import JigUnloadAfterTable
+        from modelmasterapp.models import Plating_Color
+
+        allowed_color_ids = Plating_Color.objects.filter(
+            **{zone_field: True}
+        ).values_list('id', flat=True)
+        completed_filter = Q(**{completed_field: False}) | Q(**{f'{completed_field}__isnull': True})
+        pick_row = (
+            JigUnloadAfterTable.objects.filter(
+                lot_id=lot_id,
+                total_case_qty__gt=0,
+                plating_color_id__in=allowed_color_ids,
+                na_qc_accptance=True,
+            )
+            .filter(completed_filter)
+            .only('lot_id')
+            .first()
+        )
+        if not pick_row:
+            return None
+
+        stock = self._stock_for(pick_row.lot_id)
+        return {
+            'module': module_name,
+            'url': reverse(url_name),
+            'lot_id': pick_row.lot_id,
+            'batch_id': self._batch_str(stock, pick_row.lot_id),
+        }
+
     def _check_lot_in_ss_z1(self, lot_id):
         try:
-            from SpiderSpindle_Z1.models import SpiderSpindleZ1TrayId
-            if not SpiderSpindleZ1TrayId.objects.filter(lot_id=lot_id).exists():
-                return None
-            stock = self._stock_for(lot_id)
-            return {
-                'module': 'Spider Spindle Z1',
-                'url': reverse('ss_z1_pick_table'),
-                'lot_id': lot_id,
-                'batch_id': self._batch_str(stock, lot_id),
-            }
+            return self._check_lot_in_spider_spindle_zone(
+                lot_id,
+                zone_field='jig_unload_zone_1',
+                completed_field='ss_z1_completed',
+                module_name='Spider Spindle Z1',
+                url_name='ss_z1_pick_table',
+            )
         except Exception as e:
             logger.error('%s _check_lot_in_ss_z1: %s', SCAN_TAG, e)
             return None
 
     def _check_lot_in_ss_z2(self, lot_id):
         try:
-            from SpiderSpindle_Z2.models import SpiderSpindleZ2TrayId
-            if not SpiderSpindleZ2TrayId.objects.filter(lot_id=lot_id).exists():
-                return None
-            stock = self._stock_for(lot_id)
-            return {
-                'module': 'Spider Spindle Z2',
-                'url': reverse('ss_z2_pick_table'),
-                'lot_id': lot_id,
-                'batch_id': self._batch_str(stock, lot_id),
-            }
+            return self._check_lot_in_spider_spindle_zone(
+                lot_id,
+                zone_field='jig_unload_zone_2',
+                completed_field='ss_z2_completed',
+                module_name='Spider Spindle Z2',
+                url_name='ss_z2_pick_table',
+            )
         except Exception as e:
             logger.error('%s _check_lot_in_ss_z2: %s', SCAN_TAG, e)
             return None

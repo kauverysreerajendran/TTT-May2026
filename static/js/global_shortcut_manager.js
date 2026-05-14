@@ -579,7 +579,8 @@
                 return false;
             }
         }
-        var pageLinks = Array.from(document.querySelectorAll('.pagination .page-item:not(.disabled) .page-link'));
+        // Support both Bootstrap 4 (.page-item .page-link) and simple (<li><a>) pagination structures
+        var pageLinks = Array.from(document.querySelectorAll('.pagination .page-item:not(.disabled) .page-link, .pagination li:not(.disabled):not(.active) a'));
         var pageLink = pageLinks.find(function (linkElement) {
             return linkElement.textContent.trim() === String(pageNumber) && isVisibleElement(linkElement);
         });

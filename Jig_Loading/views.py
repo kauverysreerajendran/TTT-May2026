@@ -2283,16 +2283,13 @@ def get_next_jig_cycle(jig_id, lot_id):
 		# Current load status (independent of lot)
 		is_loaded = jig_obj.is_loaded
 
-		# Count SUBMITTED operations for THIS specific (jig_id, lot_id) pair
-		# This makes cycle count per-lot
-		submitted_count = JigCompleted.objects.filter(
-			jig_id=jig_id,
-			lot_id=lot_id,
-			draft_status='submitted'
-		).count()
-
-		# Cycle = submitted operations + 1 (first use = 1)
-		next_cycle = submitted_count + 1
+		# ✅ Read cycle_count directly from Jig model (SSOT)
+		# cycle_count is incremented automatically during unloading
+		# Display cycle_count + 1 to show "next cycle" for new loading
+		# (cycle_count=0 means never unloaded, display as Cycle 1)
+		# (cycle_count=1 means unloaded once, display as Cycle 2 for next load)
+		current_cycle_count = jig_obj.cycle_count if jig_obj.cycle_count is not None else 0
+		next_cycle = current_cycle_count + 1
 
 		# Can reuse only if:
 		# 1. NOT currently loaded (is_loaded = False)
@@ -3969,6 +3966,7 @@ class JigSaveAPI(APIView):
 				jig_obj = Jig.objects.filter(jig_qr_id=jig_id).first()
 				if jig_obj:
 					jig_obj.is_loaded = True
+					jig_obj.occupied_flag = True
 					jig_obj.current_user = user
 					jig_obj.locked_at = timezone.now()
 					jig_obj.drafted = False
@@ -4005,10 +4003,11 @@ class JigSaveAPI(APIView):
 				logging.exception('JigSaveAPI: excess lot parent cleanup failed')
 
 		elif action == 'draft' and jig_id:
-			# Draft: mark jig as drafted (not fully loaded)
+			# Draft: mark jig as drafted (not fully loaded) and occupied
 			try:
 				Jig.objects.filter(jig_qr_id=jig_id).update(
 					drafted=True,
+					occupied_flag=True,
 					lot_id=lot_id,
 					batch_id=batch_id,
 					current_user=user,

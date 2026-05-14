@@ -205,14 +205,14 @@ if __name__ == "__main__":
     python_exe = sys.executable
 
     scripts_to_run = [
-        "Jig_Loading/Jig_Id.py",
+        "Jig_Loading.Jig_Id",
     ]
 
-    for script in scripts_to_run:
-        print(f"Running {script}...")
+    for module in scripts_to_run:
+        print(f"Running module {module}...")
         try:
-            subprocess.run([python_exe, script], check=True)
+            subprocess.run([python_exe, "-m", module], check=True)
         except subprocess.CalledProcessError as e:
-            print(f"Error running {script}: {e}")
+            print(f"Error running {module}: {e}")
 
     print("✅ All scripts executed successfully.")

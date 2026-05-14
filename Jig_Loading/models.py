@@ -21,6 +21,8 @@ class Jig(models.Model):
     drafted = models.BooleanField(default=False, help_text="Is this Jig currently drafted?")
     batch_id = models.CharField(max_length=100, null=True, blank=True, help_text="Batch ID for which Jig is locked")  
     lot_id = models.CharField(max_length=100, null=True, blank=True, help_text="Lot ID for which Jig is locked")
+    occupied_flag = models.BooleanField(default=False, help_text="Is this Jig currently occupied/in-use?")
+    cycle_count = models.IntegerField(default=0, help_text="Number of loading-unloading cycles completed")
 
     def __str__(self):
         return self.jig_qr_id

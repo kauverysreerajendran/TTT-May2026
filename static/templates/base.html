@@ -3801,6 +3801,47 @@
     return true;
   }
 
+  function isJigUnloadingResult(responseData) {
+    return /^jig unloading/i.test(String((responseData && responseData.module) || ''));
+  }
+
+  function maybeOpenJigUnloadingTrayScan(row, responseData, trayId) {
+    if (!isJigUnloadingResult(responseData)) return false;
+    if (typeof window.openJigUnloadTrayScanFromGlobalScan !== 'function') return false;
+    const jigCompletedId = (responseData && responseData.jig_completed_id) ||
+      (row && row.getAttribute && row.getAttribute('data-jig-completed-id'));
+    if (!jigCompletedId) return false;
+
+    window.setTimeout(function() {
+      if (!document.body.contains(row)) return;
+      autoOpeningDraftModal = true;
+      try {
+        if (typeof window._gkbHighlightRow === 'function') {
+          window._gkbHighlightRow(row);
+        }
+        window.openJigUnloadTrayScanFromGlobalScan({
+          row: row,
+          tray_id: trayId,
+          lot_id: responseData && responseData.lot_id,
+          stock_lot_id: responseData && responseData.stock_lot_id,
+          batch_id: responseData && responseData.batch_id,
+          jig_completed_id: jigCompletedId,
+          response_data: responseData || {}
+        });
+        logScan('[SCAN_JIG_UNLOAD_MODAL]', {
+          tray_id: trayId,
+          module: responseData && responseData.module,
+          opened: true
+        });
+      } finally {
+        window.setTimeout(function() {
+          autoOpeningDraftModal = false;
+        }, 300);
+      }
+    }, 180);
+    return true;
+  }
+
   function openDraftRowModal(row, responseData, trayId) {
     if (!isDraftRow(row)) return false;
     const trigger = findDraftModalTrigger(row);
@@ -3840,7 +3881,8 @@
     const row = match.row;
     moveHighlightedRowToTop(row);
     applyFoundHighlight(row);
-    const openedDraft = openDraftRowModal(row, responseData, trayId);
+    const openedJigUnload = maybeOpenJigUnloadingTrayScan(row, responseData, trayId);
+    const openedDraft = openedJigUnload ? true : openDraftRowModal(row, responseData, trayId);
     let openedInputVerification = false;
     if (!openedDraft) {
       openedInputVerification = maybeOpenInputScreeningVerifiedTrayModal(row, responseData, trayId);

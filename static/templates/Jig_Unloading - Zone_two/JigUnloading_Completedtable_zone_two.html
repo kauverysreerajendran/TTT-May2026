@@ -1842,12 +1842,21 @@ document.addEventListener("DOMContentLoaded", function () {
       }
 
       // ✅ CREATE buildTableHTML FUNCTION AND STORE IN MODAL
+function safeValue(value) {
+  const div = document.createElement('div');
+  div.textContent = value === null || value === undefined ? '' : String(value);
+  return div.innerHTML;
+}
+
 function buildTableHTML(showValidationColumn = false) {
+  const hasSourceJig = traysData.some((tray) => tray.source_jig);
+  const columnCount = 3 + (hasSourceJig ? 1 : 0) + (showValidationColumn ? 1 : 0);
   let html = `
     <table class="table table-bordered table-sm" style="width:100%; margin-bottom:0;">
       <thead>
         <tr>
           <th style="width:50px;">S.no</th>
+          ${hasSourceJig ? '<th>Source Jig</th>' : ''}
           <th>Tray ID</th>
           <th>Tray Qty</th>
           ${showValidationColumn ? '<th>Tray Validation Status</th>' : ''}
@@ -1863,11 +1872,16 @@ function buildTableHTML(showValidationColumn = false) {
       html += `
         <tr>
           <td>${sno}</td>
+          ${hasSourceJig ? `
+            <td>
+              <input type="text" class="form-control" value="${safeValue(tray.source_jig || 'N/A')}" readonly style="width: 100%;" />
+            </td>
+          ` : ''}
           <td>
-            <input type="text" class="form-control" value="${tray.tray_id || 'N/A'}" readonly style="width: 100%;" />
+            <input type="text" class="form-control" value="${safeValue(tray.tray_id || 'N/A')}" readonly style="width: 100%;" />
           </td>
           <td>
-            <input type="number" class="form-control" value="${tray.tray_quantity || '0'}" readonly style="width: 100%;" />
+            <input type="number" class="form-control" value="${safeValue(tray.tray_quantity || '0')}" readonly style="width: 100%;" />
           </td>
           ${showValidationColumn ? `
             <td>
@@ -1888,7 +1902,7 @@ function buildTableHTML(showValidationColumn = false) {
         } else {
           html += `
             <tr>
-              <td colspan="${showValidationColumn ? '4' : '3'}" style="text-align: center; color: #888; padding: 20px;">
+              <td colspan="${columnCount}" style="text-align: center; color: #888; padding: 20px;">
                 No tray data found for lot ID: ${lotId}
               </td>
             </tr>

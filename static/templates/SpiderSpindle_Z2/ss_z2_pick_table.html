@@ -521,6 +521,43 @@ document.addEventListener('DOMContentLoaded', function() {
       });
     }
   });
+
+  function normalizeModule(value) {
+    return String(value || '').trim().toLowerCase().replace(/_/g, ' ');
+  }
+
+  function findRowByLot(lotId) {
+    if (!lotId) return null;
+    var normalizedLotId = String(lotId).trim();
+    return Array.from(document.querySelectorAll('#order-listing tbody tr[data-lot-id]')).find(function(row) {
+      return row.getAttribute('data-lot-id') === normalizedLotId || row.getAttribute('data-stock-lot-id') === normalizedLotId;
+    }) || null;
+  }
+
+  document.addEventListener('globalScan:success', function(event) {
+    var detail = (event && event.detail) || {};
+    if (normalizeModule(detail.module) !== 'spider spindle z2') return;
+
+    window.setTimeout(function() {
+      var row = document.querySelector('#order-listing tbody tr[data-global-scan-active="1"]') ||
+        findRowByLot(detail.lot_id) ||
+        document.querySelector('#order-listing tbody tr.dp-row-action-highlight, #order-listing tbody tr.gkb-row-focus, #order-listing tbody tr.gs-active-scan');
+      if (!row || row.classList.contains('hold-row')) return;
+
+      var addButton = row.querySelector('button.btn-add-spider');
+      if (!addButton || addButton.disabled || addButton.classList.contains('disabled')) return;
+
+      addButton.click();
+      document.dispatchEvent(new CustomEvent('spiderSpindle:autoOpenAddModal', {
+        detail: {
+          tray_id: detail.tray_id || '',
+          lot_id: row.getAttribute('data-lot-id') || detail.lot_id || '',
+          zone: 'Z2',
+          triggered_by: 'global_scan'
+        }
+      }));
+    }, 300);
+  });
 });
 </script>
 {% endblock %}

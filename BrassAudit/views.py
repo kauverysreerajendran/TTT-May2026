@@ -420,6 +420,15 @@ class BrassAuditCompletedView(APIView):
             ).filter(Q(jig_draft=True) | Q(Jig_Load_completed=True))
         )
 
+        # ✅ FIX: Only show lots with actual Brass_Audit_Submission records
+        # Prevents unprocessed lots (just moved through stages) from appearing in Completed table
+        has_valid_submission = Exists(
+            Brass_Audit_Submission.objects.filter(
+                lot_id=OuterRef('lot_id'),
+                is_completed=True
+            )
+        )
+
         queryset = TotalStockModel.objects.select_related(
             'batch_id',
             'batch_id__model_stock_no',
@@ -436,6 +445,8 @@ class BrassAuditCompletedView(APIView):
             Q(brass_audit_accptance=True) |
             Q(brass_audit_rejection=True) |
             Q(brass_audit_few_cases_accptance=True, brass_audit_onhold_picking=False)
+        ).filter(
+            has_valid_submission
         )
 
         # BUG2 FIX: Exclude child lots from partial splits — only parent summary row
@@ -524,17 +535,33 @@ class BrassAuditCompletedView(APIView):
                 data['submission_type'] = submission.submission_type
                 logger.info(f"[BrassAuditCompleted] Lot {lot_id}: Fetched from submission - lot_qty={submission.total_lot_qty}, accept={submission.accepted_qty}, reject={submission.rejected_qty}")
             else:
-                # Fallback: use brass_qc_accepted_qty
+                # ✅ ENHANCED FALLBACK: Multi-tier fallback for lot qty
+                # Priority: brass_qc_accepted_qty → brass_audit_physical_qty → brass_audit_accepted_qty → total_stock
+                fallback_lot_qty = 0
+                fallback_source = "none"
+                
                 if brass_qc_accepted_qty and brass_qc_accepted_qty > 0:
-                    data['display_lot_qty'] = brass_qc_accepted_qty
-                    data['display_accepted_qty'] = data.get('brass_audit_accepted_qty', 0)
-                    data['display_rejected_qty'] = data.get('brass_audit_rejection_qty', 0)
-                else:
-                    data['display_lot_qty'] = 0
-                    data['display_accepted_qty'] = 0
-                    data['display_rejected_qty'] = 0
+                    fallback_lot_qty = brass_qc_accepted_qty
+                    fallback_source = "brass_qc_accepted_qty"
+                elif stock_obj.brass_audit_physical_qty and stock_obj.brass_audit_physical_qty > 0:
+                    fallback_lot_qty = stock_obj.brass_audit_physical_qty
+                    fallback_source = "brass_audit_physical_qty"
+                elif stock_obj.brass_audit_accepted_qty and stock_obj.brass_audit_accepted_qty > 0:
+                    fallback_lot_qty = stock_obj.brass_audit_accepted_qty
+                    fallback_source = "brass_audit_accepted_qty"
+                elif stock_obj.total_stock and stock_obj.total_stock > 0:
+                    fallback_lot_qty = stock_obj.total_stock
+                    fallback_source = "total_stock"
+                
+                data['display_lot_qty'] = fallback_lot_qty
+                data['display_accepted_qty'] = data.get('brass_audit_accepted_qty', 0)
+                data['display_rejected_qty'] = data.get('brass_audit_rejection_qty', 0)
                 data['submission_type'] = ''
-                logger.warning(f"[BrassAuditCompleted] Lot {lot_id}: No submission found, using fallback values")
+                
+                if fallback_lot_qty > 0:
+                    logger.info(f"[BrassAuditCompleted] Lot {lot_id}: No submission found, using fallback source '{fallback_source}' with qty={fallback_lot_qty}")
+                else:
+                    logger.warning(f"[BrassAuditCompleted] Lot {lot_id}: No submission found and all fallback sources are 0 or null")
 
             display_qty = data.get('display_lot_qty', 0)
             if tray_capacity > 0 and display_qty > 0:

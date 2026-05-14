@@ -27,9 +27,67 @@ from Recovery_DP.models import *
 from Inprocess_Inspection.models import InprocessInspectionTrayCapacity
 from django.contrib.auth.mixins import LoginRequiredMixin
 
+
+def _zone2_ordered_unique(values):
+    seen = set()
+    result = []
+    for value in values or []:
+        if value in (None, ''):
+            continue
+        text_value = str(value).strip()
+        if not text_value or text_value in seen:
+            continue
+        seen.add(text_value)
+        result.append(text_value)
+    return result
+
+
+def _zone2_extract_lot_id(raw_id):
+    if not raw_id:
+        return ''
+    value = str(raw_id).strip().lstrip('-')
+    if ':' in value:
+        possible_lot = value.rsplit(':', 1)[-1].strip()
+        if possible_lot:
+            return possible_lot
+    if value.startswith('JLOT-') and '-' in value[5:]:
+        return value.rsplit('-', 1)[-1]
+    return value
+
+
+def _zone2_submission_tray_signature(tray_data):
+    if not isinstance(tray_data, list):
+        return tuple()
+    signature = []
+    for entry in tray_data:
+        if not isinstance(entry, dict):
+            continue
+        tray_id = str(entry.get('tray_id') or '').strip().upper()
+        if not tray_id:
+            continue
+        signature.append((
+            int(entry.get('slot') or 0),
+            tray_id,
+            int(entry.get('qty') or entry.get('tray_qty') or entry.get('tray_quantity') or 0),
+            bool(entry.get('is_top_tray') or entry.get('top_tray')),
+        ))
+    return tuple(sorted(signature))
+
+
+def _zone2_source_metadata_from_tray_data(tray_data):
+    if not isinstance(tray_data, list):
+        return {}
+    for entry in tray_data:
+        if not isinstance(entry, dict):
+            continue
+        metadata = entry.get('_source_metadata') or entry.get('source_metadata')
+        if isinstance(metadata, dict):
+            return metadata
+    return {}
+
 class JU_Zone_MainTable(LoginRequiredMixin, TemplateView):
     template_name = "Jig_Unloading - Zone_two/Jig_Unloading_Main_zone_two.html"
-    login_url = '/login/'
+    login_url = 'login'
 
     def get_dynamic_tray_capacity(self, tray_type_name):
         """
@@ -1609,9 +1667,13 @@ class JU_Zone_MainTable(LoginRequiredMixin, TemplateView):
         # Also collect bare lot_ids (stored when jig_lot_id was empty: "-LIDxxx" or plain "LIDxxx")
         unload_map = {}
         bare_unloaded_lot_ids = set()  # lot_ids with no valid jig_id prefix
+        all_submitted_lot_ids = set()
         for record in unload_records:
             if record['combine_lot_ids']:
                 for combined_id in record['combine_lot_ids']:
+                    actual_lot_id = _zone2_extract_lot_id(combined_id)
+                    if actual_lot_id:
+                        all_submitted_lot_ids.add(actual_lot_id)
                     parts = parse_combined_lot_id(combined_id)
                     if len(parts) == 2 and parts[0] and parts[1]:
                         jig_id, lot_id = parts[0], parts[1]
@@ -1622,6 +1684,34 @@ class JU_Zone_MainTable(LoginRequiredMixin, TemplateView):
                     elif combined_id and '-' not in combined_id:
                         # plain lot_id (no prefix at all)
                         bare_unloaded_lot_ids.add(combined_id)
+
+        final_submissions = list(
+            JUSubmittedZ1.objects.filter(is_draft=False).only(
+                'id', 'jig_completed_id', 'jig_qr_id', 'model_no', 'lot_id', 'total_qty', 'tray_data'
+            )
+        )
+        submitted_signature_keys = set()
+        for submission in final_submissions:
+            metadata = _zone2_source_metadata_from_tray_data(submission.tray_data)
+            if isinstance(metadata, dict):
+                for source in metadata.get('source_mappings', []):
+                    if isinstance(source, dict):
+                        source_lot_id = str(source.get('lot_id') or '').strip()
+                        if source_lot_id:
+                            all_submitted_lot_ids.add(source_lot_id)
+
+            if submission.lot_id in all_submitted_lot_ids:
+                signature = _zone2_submission_tray_signature(submission.tray_data)
+                if signature:
+                    submitted_signature_keys.add((submission.model_no, signature))
+
+        if submitted_signature_keys:
+            for submission in final_submissions:
+                signature = _zone2_submission_tray_signature(submission.tray_data)
+                if signature and (submission.model_no, signature) in submitted_signature_keys:
+                    all_submitted_lot_ids.add(submission.lot_id)
+
+        print(f"[ZONE2 FILTER] Submitted source lot_ids to hide: {len(all_submitted_lot_ids)}")
         
         # Also check direct unloads
         direct_unloads = set(JigUnload_TrayId.objects.values_list('lot_id', flat=True))
@@ -1683,6 +1773,7 @@ class JU_Zone_MainTable(LoginRequiredMixin, TemplateView):
             unloaded_lot_ids = (
                 unload_map.get(jig.jig_id, set())
                 | (jig_lot_ids & bare_unloaded_lot_ids)
+                | (jig_lot_ids & all_submitted_lot_ids)
             )
             
             # Keep jig if ANY lot_id is NOT unloaded
@@ -2617,7 +2708,7 @@ def JU_Zone_save_jig_unload_tray_ids(request):
                 updated_combine_lot_ids = list(set(existing_record.combine_lot_ids + final_db_combined_lot_ids))
                 
                 existing_record.combine_lot_ids = updated_combine_lot_ids
-                existing_record.total_case_qty += total_case_qty  # Add to existing
+                existing_record.total_case_qty = total_case_qty
                 existing_record.missing_qty = max(existing_record.missing_qty, missing_qty)
                 existing_record.Un_loaded_date_time = timezone.now()
                 existing_record.last_process_module = "Jig Unloading"
@@ -2975,14 +3066,20 @@ def JU_Zone_save_jig_unload_tray_ids(request):
                     released_jigs_count = released_jigs.count()
                     
                     if released_jigs_count > 0:
-                        # Update all matching jigs
-                        released_jigs.update(is_loaded=False)
+                        # Update all matching jigs - mark as free, increment cycle count
+                        from django.db.models import F
+                        released_jigs.update(
+                            is_loaded=False,
+                            occupied_flag=False,
+                            cycle_count=F('cycle_count') + 1
+                        )
                         total_released_jigs_count += released_jigs_count
-                        print(f"[JIG RELEASE Zone2] ✅ Released {released_jigs_count} Jig QR ID(s) '{jig_qr_id}' (set is_loaded=False)")
+                        print(f"[JIG RELEASE Zone2] ✅ Released {released_jigs_count} Jig QR ID(s) '{jig_qr_id}' (set is_loaded=False, occupied_flag=False, cycle_count+1)")
                         
-                        # Log each released jig for tracking
+                        # Log each released jig for tracking with cycle count
                         for jig in released_jigs:
-                            print(f"[JIG RELEASE Zone2] ✅ Jig ID {jig.id} - QR: '{jig.jig_qr_id}' is now available for reuse")
+                            jig.refresh_from_db()  # Get updated cycle_count
+                            print(f"[JIG RELEASE Zone2] ✅ Jig ID {jig.id} - QR: '{jig.jig_qr_id}' is now available for reuse (Cycle: {jig.cycle_count})")
                     else:
                         print(f"[JIG RELEASE Zone2] ⚠️ No loaded Jig found with QR ID '{jig_qr_id}' to release")
                 
@@ -3767,7 +3864,7 @@ class JU_Zone_ListAPIView(APIView):
 
 class JU_Zone_Completedtable(LoginRequiredMixin, TemplateView):
     template_name = 'Jig_Unloading - Zone_two/JigUnloading_Completedtable_zone_two.html'
-    login_url = '/login/'
+    login_url = 'login'
 
     def get_dynamic_tray_capacity(self, tray_type_name):
         """
@@ -4296,6 +4393,9 @@ class JU_Zone_Completedtable(LoginRequiredMixin, TemplateView):
                 model_colors[_mk_fb] = global_model_colors.get(_mk_fb, '#cccccc')
                 model_images[_mk_fb] = model_images_map.get(_mk_fb, {'images': [], 'first_image': "/static/assets/images/imagePlaceholder.jpg"})
 
+            source_lot_id_quantities = dict(lot_id_quantities)
+            display_lot_id_quantities = {unload.lot_id: total_case_qty} if total_case_qty else source_lot_id_quantities
+
             source_jigs_by_id = {}
 
             def _remember_source_jig(source_jig):
@@ -4435,7 +4535,8 @@ class JU_Zone_Completedtable(LoginRequiredMixin, TemplateView):
                 'no_of_model_cases': no_of_model_cases,
                 'model_images': model_images,
                 'model_colors': model_colors,
-                'lot_id_quantities': lot_id_quantities,
+                'lot_id_quantities': display_lot_id_quantities,
+                'source_lot_id_quantities': source_lot_id_quantities,
                 'lot_id_model_map': {},
                 'unloading_remarks': unloading_remarks,
                 'bath_numbers': {'bath_number': self._resolve_bath_number_for_completed(unload, jig_qr_id)},

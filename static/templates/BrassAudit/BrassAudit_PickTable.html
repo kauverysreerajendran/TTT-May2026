@@ -2383,7 +2383,8 @@ document.addEventListener('DOMContentLoaded', function() {
     }
     if (closeBtn) closeBtn.addEventListener('click', closeModal);
     if (cancelBtn) cancelBtn.addEventListener('click', closeModal);
-    overlay.addEventListener('click', function(e) { if (e.target === overlay) closeModal(); });
+    // ERR1 FIX: Do NOT close modal when clicking outside (backdrop). Only close via buttons.
+    // overlay.addEventListener('click', function(e) { if (e.target === overlay) closeModal(); });
 
     // ── Open modal from reject button ──
     document.querySelectorAll('.tray-scan-btn').forEach(function(btn) {
@@ -3666,13 +3667,13 @@ document.addEventListener('DOMContentLoaded', function() {
       });
     }
 
-    // Close on backdrop click
-    holdModal.addEventListener('click', function(e) {
-      if (e.target === holdModal) {
-        holdModal.style.display = 'none';
-        window.holdToggleState = null;
-      }
-    });
+    // ERR1 FIX: Do NOT close modal when clicking outside (backdrop)
+    // holdModal.addEventListener('click', function(e) {
+    //   if (e.target === holdModal) {
+    //     holdModal.style.display = 'none';
+    //     window.holdToggleState = null;
+    //   }
+    // });
 
     attachHoldToggleListeners();
   })();

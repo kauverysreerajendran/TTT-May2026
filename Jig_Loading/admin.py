@@ -27,8 +27,8 @@ class JigLoadingMasterAdmin(admin.ModelAdmin):
 
 # Jigs Table
 class JigAdmin(admin.ModelAdmin):
-    list_display = ['jig_qr_id', 'is_loaded', 'get_is_drafted', 'get_current_user', 'get_locked_at',  'created_at', 'updated_at']  # <-- ADD 'get_is_drafted' HERE
-    list_filter = ['is_loaded', 'drafted', 'created_at', 'updated_at']
+    list_display = ['jig_qr_id', 'is_loaded', 'occupied_flag', 'cycle_count', 'get_is_drafted', 'get_current_user', 'get_locked_at',  'created_at', 'updated_at']
+    list_filter = ['is_loaded', 'occupied_flag', 'drafted', 'created_at', 'updated_at']
     search_fields = ['jig_qr_id', 'current_user__username', 'current_user__first_name', 'current_user__last_name']
     readonly_fields = ['created_at', 'updated_at']
     ordering = ['-updated_at']

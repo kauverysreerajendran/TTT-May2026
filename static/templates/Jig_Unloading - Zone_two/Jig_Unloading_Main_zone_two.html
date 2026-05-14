@@ -2480,6 +2480,107 @@ document.addEventListener('DOMContentLoaded', function() {
     setupLotQtyListener(); // ✅ Attach LOT Qty edit listener
   }
 
+  function normalizeTrayForScan(value) {
+    return String(value || '').replace(/\s+/g, '').toUpperCase();
+  }
+
+  function modelHasGlobalTray(modelData, trayId) {
+    const normalizedTray = normalizeTrayForScan(trayId);
+    if (!normalizedTray) return false;
+
+    const trayGroups = [];
+    if (modelData.submitted_data && Array.isArray(modelData.submitted_data.tray_data)) {
+      trayGroups.push(modelData.submitted_data.tray_data);
+    }
+    if (Array.isArray(modelData.tray_slots)) {
+      trayGroups.push(modelData.tray_slots);
+    }
+
+    return trayGroups.some(function(group) {
+      return group.some(function(item) {
+        return normalizeTrayForScan(item && item.tray_id) === normalizedTray;
+      });
+    });
+  }
+
+  function modelMatchesGlobalSourceLot(modelData, responseData) {
+    const sourceLotId = String((responseData && (responseData.stock_lot_id || responseData.source_lot_id)) || '');
+    return !!sourceLotId && String(modelData.lot_id || '') === sourceLotId;
+  }
+
+  function focusMatchedGlobalTrayInput(trayId) {
+    const normalizedTray = normalizeTrayForScan(trayId);
+    const inputs = document.querySelectorAll('#z1TraySlotsContainer .z1-tray-input');
+    inputs.forEach(function(input) {
+      if (normalizeTrayForScan(input.value) !== normalizedTray) return;
+      input.focus();
+      input.select();
+      const row = input.closest('tr');
+      if (row) row.style.background = '#e8f5e9';
+    });
+  }
+
+  window.openJigUnloadTrayScanFromGlobalScan = function(payload) {
+    payload = payload || {};
+    const row = payload.row;
+    const responseData = payload.response_data || payload;
+    const trayId = payload.tray_id || responseData.tray_id || '';
+    const jigCompletedId = payload.jig_completed_id ||
+      (responseData && responseData.jig_completed_id) ||
+      (row && row.getAttribute('data-jig-completed-id'));
+
+    if (!jigCompletedId) return false;
+
+    if (row) {
+      document.querySelectorAll('#order-listing tbody tr.z1-row-open').forEach(function(r) { r.classList.remove('z1-row-open'); });
+      row.classList.add('z1-row-open');
+    }
+
+    currentJigCompletedId = jigCompletedId;
+    modal.style.display = 'flex';
+    showLayer(layerModelList);
+    document.getElementById('z1ModelTableBody').innerHTML =
+      '<tr><td colspan="7" style="text-align:center;padding:20px;color:#888;font-size:13px;">Loading...</td></tr>';
+
+    fetch(API_BASE + '/get_unload_models_z1/?jig_completed_id=' + encodeURIComponent(jigCompletedId))
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        currentModelsData = data;
+        document.getElementById('z1ModalJigId').textContent = data.jig_qr_id || '-';
+        renderModelTable(data.models || [], data.all_unloaded);
+
+        const models = data.models || [];
+        let targetIndex = models.findIndex(function(modelData) {
+          return modelHasGlobalTray(modelData, trayId);
+        });
+        if (targetIndex < 0) {
+          targetIndex = models.findIndex(function(modelData) {
+            return modelMatchesGlobalSourceLot(modelData, responseData);
+          });
+        }
+        if (targetIndex < 0 && models.length === 1) targetIndex = 0;
+
+        if (targetIndex >= 0) {
+          const targetModel = models[targetIndex];
+          if (targetModel.is_unloaded || targetModel.is_submitted_lot) {
+            openView(targetIndex, trayId);
+          } else {
+            openTrayScan(targetIndex);
+            window.setTimeout(function() { focusMatchedGlobalTrayInput(trayId); }, 80);
+          }
+        } else {
+          showZ1Notify('Tray found in this JIG, but the matching model row could not be resolved.', 'error');
+        }
+      })
+      .catch(function(err) {
+        console.error('Global scan Jig Unloading open error:', err);
+        document.getElementById('z1ModelTableBody').innerHTML =
+          '<tr><td colspan="7" style="text-align:center;color:#c62828;padding:20px;">Error loading data</td></tr>';
+      });
+
+    return true;
+  };
+
   function renderTraySlots(modelData, shouldAutoFocus) {
     if (shouldAutoFocus === undefined) shouldAutoFocus = false; // ✅ Default: no auto-focus
     const container = document.getElementById('z1TraySlotsContainer');
@@ -2920,12 +3021,19 @@ document.addEventListener('DOMContentLoaded', function() {
   });
 
   // --- VIEW MODE ---
-  function openView(idx) {
+  function openView(idx, highlightTrayId) {
     const m = currentModelsData.models[idx];
     document.getElementById('z1ViewModelNo').textContent = m.model_no;
     const content = document.getElementById('z1ViewContent');
     if (m.submitted_data && m.submitted_data.tray_data) {
-      let html = '<table style="width:100%;border-collapse:collapse;font-size:12px;">';
+      const normalizedHighlightTray = normalizeTrayForScan(highlightTrayId);
+      let html = '';
+      if (m.is_submitted_lot) {
+        html += '<div style="padding:9px 12px;background:#e8f5e9;border-bottom:1px solid #c8e6c9;font-size:11px;color:#1b5e20;font-weight:600;">Model submitted - read only tray view</div>';
+      } else if (m.is_unloaded) {
+        html += '<div style="padding:9px 12px;background:#e3f2fd;border-bottom:1px solid #bbdefb;font-size:11px;color:#1565c0;font-weight:600;">Unload saved - read only tray view</div>';
+      }
+      html += '<table style="width:100%;border-collapse:collapse;font-size:12px;">';
       html += '<thead><tr style="background:#f8fafc;border-bottom:2px solid #eceff1;">' +
         '<th style="padding:8px 10px;font-size:10px;font-weight:600;color:#546e7a;text-transform:uppercase;letter-spacing:0.4px;text-align:center;">#</th>' +
         '<th style="padding:8px 10px;font-size:10px;font-weight:600;color:#546e7a;text-transform:uppercase;letter-spacing:0.4px;">Model</th>' +
@@ -2934,10 +3042,11 @@ document.addEventListener('DOMContentLoaded', function() {
         '</tr></thead><tbody>';
       m.submitted_data.tray_data.forEach(function(t, i) {
         const isTop = t.is_top_tray;
-        html += '<tr style="border-bottom:1px solid #f0f4f5;background:' + (isTop ? '#fff8f1' : (i % 2 === 0 ? '#fff' : '#fafcfc')) + ';">';
+        const isMatchedTray = normalizedHighlightTray && normalizeTrayForScan(t.tray_id) === normalizedHighlightTray;
+        html += '<tr style="border-bottom:1px solid #f0f4f5;background:' + (isMatchedTray ? '#e8f5e9' : (isTop ? '#fff8f1' : (i % 2 === 0 ? '#fff' : '#fafcfc'))) + ';">';
         html += '<td style="padding:7px 10px;text-align:center;font-size:11px;color:#90a4ae;">' + (i + 1) + (isTop ? '<span style="color:#e65100;margin-left:2px;">&#x2605;</span>' : '') + '</td>';
         html += '<td style="padding:7px 10px;font-size:11px;color:#00695c;font-weight:500;">' + escHtml(m.model_no) + '</td>';
-        html += '<td style="padding:7px 10px;font-size:12px;font-weight:600;color:#1a2e3b;">' + escHtml(t.tray_id) + '</td>';
+        html += '<td style="padding:7px 10px;font-size:12px;font-weight:600;color:' + (isMatchedTray ? '#1b5e20' : '#1a2e3b') + ';">' + escHtml(t.tray_id) + (isMatchedTray ? ' <span style="font-size:10px;color:#1b5e20;">MATCHED</span>' : '') + '</td>';
         html += '<td style="padding:7px 10px;text-align:center;font-size:12px;color:#37474f;">' + t.qty + '</td>';
         html += '</tr>';
       });

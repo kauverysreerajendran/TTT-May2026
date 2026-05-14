@@ -5,12 +5,14 @@ from django.views.decorators.http import require_http_methods
 from modelmasterapp.models import *
 from modelmasterapp.tray_code_mapping import get_tray_codes_for_plating_stock, validate_tray_code_for_stock
 from django.db.models import OuterRef, Subquery, Exists, F, TextField, Q
+from django.db import transaction
 from django.db.models.functions import Cast
 from django.db.models.fields.json import KeyTextTransform
 from django.core.paginator import Paginator
 import math
 import json
 import re
+import logging
 from django.utils.decorators import method_decorator
 from rest_framework.views import APIView
 from django.views.generic import TemplateView
@@ -27,9 +29,83 @@ from Recovery_DP.models import *
 from Inprocess_Inspection.models import InprocessInspectionTrayCapacity
 from django.contrib.auth.mixins import LoginRequiredMixin
 
+logger = logging.getLogger(__name__)
+
+
+def _jul_ordered_unique(values):
+    seen = set()
+    result = []
+    for value in values or []:
+        if value in (None, ''):
+            continue
+        text_value = str(value).strip()
+        if not text_value or text_value in seen:
+            continue
+        seen.add(text_value)
+        result.append(text_value)
+    return result
+
+
+def _jul_extract_source_lot_id(raw_id):
+    if not raw_id:
+        return ''
+    value = str(raw_id).strip().lstrip('-')
+    if ':' in value:
+        possible_lot = value.rsplit(':', 1)[-1].strip()
+        if possible_lot:
+            return possible_lot
+    if value.startswith('JLOT-') and '-' in value[5:]:
+        return value.rsplit('-', 1)[-1]
+    return value
+
+
+def _jul_submission_tray_signature(tray_data):
+    if not isinstance(tray_data, list):
+        return tuple()
+    signature = []
+    for entry in tray_data:
+        if not isinstance(entry, dict):
+            continue
+        tray_id = str(entry.get('tray_id') or '').strip().upper()
+        if not tray_id:
+            continue
+        signature.append((
+            int(entry.get('slot') or 0),
+            tray_id,
+            int(entry.get('qty') or entry.get('tray_qty') or entry.get('tray_quantity') or 0),
+            bool(entry.get('is_top_tray') or entry.get('top_tray')),
+        ))
+    return tuple(sorted(signature))
+
+
+def _jul_source_metadata_from_tray_data(tray_data):
+    if not isinstance(tray_data, list):
+        return {}
+    for entry in tray_data:
+        if not isinstance(entry, dict):
+            continue
+        metadata = entry.get('_source_metadata') or entry.get('source_metadata')
+        if isinstance(metadata, dict):
+            return metadata
+    return {}
+
+
+def _jul_enrich_tray_data_with_sources(tray_data, source_metadata):
+    if not isinstance(tray_data, list) or not source_metadata:
+        return tray_data
+    enriched = []
+    for entry in tray_data:
+        if isinstance(entry, dict):
+            copied = dict(entry)
+            copied['_source_metadata'] = source_metadata
+            enriched.append(copied)
+        else:
+            enriched.append(entry)
+    return enriched
+
 class Jig_Unloading_MainTable(LoginRequiredMixin, TemplateView):
     template_name = "Jig_Unloading/Jig_Unloading_Main.html"
-    login_url = '/login/'
+    login_url = 'login'
 
     def get_dynamic_tray_capacity(self, tray_type_name):
         """
@@ -1609,7 +1685,7 @@ class Jig_Unloading_MainTable(LoginRequiredMixin, TemplateView):
 
 class JigUnloading_Completedtable(LoginRequiredMixin, TemplateView):
     template_name = 'Jig_Unloading/JigUnloading_Completedtable.html'
-    login_url = '/login/'
+    login_url = 'login'
 
     def get_dynamic_tray_capacity(self, tray_type_name):
         """
@@ -2516,12 +2592,35 @@ class GetUnloadModelsZ1View(APIView):
             sub = JUSubmittedZ1.objects.filter(
                 jig_completed_id=jig_completed_id, lot_id=lot_id
             ).order_by('-submitted_at').first()
+            source_metadata = _jul_source_metadata_from_tray_data(sub.tray_data if sub else None)
+            source_mappings = source_metadata.get('source_mappings', []) if isinstance(source_metadata, dict) else []
+            restored_merged_lots = []
+            display_jig_id = jig_id
+            if source_mappings:
+                source_jig_ids = []
+                for source in source_mappings:
+                    if not isinstance(source, dict):
+                        continue
+                    source_lot_id = str(source.get('lot_id') or '').strip()
+                    source_jig_id = str(source.get('jig_id') or '').strip()
+                    if source_jig_id:
+                        source_jig_ids.append(source_jig_id)
+                    if source_lot_id and source_lot_id != lot_id:
+                        restored_merged_lots.append({
+                            'jig_completed_id': source.get('jig_completed_id'),
+                            'lot_id': source_lot_id,
+                            'qty': int(source.get('qty') or 0),
+                            'jig_id': source_jig_id,
+                        })
+                if source_jig_ids:
+                    display_jig_id = ', '.join(_jul_ordered_unique(source_jig_ids))
             if sub:
                 submitted_data = {
                     'tray_data': sub.tray_data,
                     'missing_qty': sub.missing_qty,
                     'top_tray_remark': sub.top_tray_remark,
                     'is_draft': sub.is_draft,
+                    'source_metadata': source_metadata,
                 }
 
             # Determine draft status for this model
@@ -2555,7 +2654,8 @@ class GetUnloadModelsZ1View(APIView):
                 'is_submitted_lot': is_submitted_lot,
                 'submitted_data': submitted_data,
                 'images': images,
-                'jig_id': jig_id,
+                'jig_id': display_jig_id,
+                'merged_lots': restored_merged_lots,
             })
 
         is_multi_model = len(models_list) > 1
@@ -2736,6 +2836,7 @@ class SaveModelUnloadZ1View(APIView):
         tray_code = data.get('tray_code', '')
         tray_color = data.get('tray_color', '')
         lot_qty_edited = data.get('lot_qty_edited', False)
+        merged_lots = data.get('merged_lots', []) or []
 
         if not jig_completed_id or not lot_id or not model_no:
             return Response({'error': 'jig_completed_id, lot_id, and model_no are required'}, status=400)
@@ -2806,6 +2907,42 @@ class SaveModelUnloadZ1View(APIView):
 
         jig_qr_id = jc.jig_id or jc.lot_id
 
+        merged_qty = 0
+        for merged_lot in merged_lots:
+            try:
+                merged_qty += int(merged_lot.get('qty') or 0)
+            except (TypeError, ValueError):
+                continue
+        try:
+            primary_source_qty = max(int(total_qty or 0) - merged_qty, 0)
+        except (TypeError, ValueError):
+            primary_source_qty = 0
+
+        source_mappings = [{
+            'jig_completed_id': int(jig_completed_id),
+            'lot_id': lot_id,
+            'qty': primary_source_qty if merged_lots else int(total_qty or 0),
+            'jig_id': jig_qr_id,
+        }]
+        for merged_lot in merged_lots:
+            merged_lot_id = str(merged_lot.get('lot_id') or '').strip()
+            if not merged_lot_id:
+                continue
+            source_mappings.append({
+                'jig_completed_id': merged_lot.get('jig_completed_id'),
+                'lot_id': merged_lot_id,
+                'qty': int(merged_lot.get('qty') or 0),
+                'jig_id': str(merged_lot.get('jig_id') or '').strip(),
+            })
+
+        source_metadata = {
+            'primary_lot_id': lot_id,
+            'source_lot_ids': _jul_ordered_unique([source.get('lot_id') for source in source_mappings]),
+            'source_jig_ids': _jul_ordered_unique([source.get('jig_id') for source in source_mappings]),
+            'source_mappings': source_mappings,
+        }
+        tray_data_with_sources = _jul_enrich_tray_data_with_sources(tray_data, source_metadata)
+
         # ✅ CRITICAL: Use submitted total_qty as single source of truth
         # This is the edited LOT Qty from frontend - DO NOT recalculate from other sources
         # Create or update JUSubmittedZ1
@@ -2821,7 +2958,7 @@ class SaveModelUnloadZ1View(APIView):
                 'tray_code': tray_code,
                 'tray_color': tray_color,
                 'num_trays': len(tray_data),
-                'tray_data': tray_data,
+                'tray_data': tray_data_with_sources,
                 'missing_qty': missing_qty,
                 'top_tray_remark': top_tray_remark,
                 'is_draft': is_draft,
@@ -2830,7 +2967,6 @@ class SaveModelUnloadZ1View(APIView):
         )
 
         # Save records for merged lots (Add Model with same plating_stk_no)
-        merged_lots = data.get('merged_lots', [])
         for ml in merged_lots:
             ml_jc_id = ml.get('jig_completed_id')
             ml_lot_id = ml.get('lot_id')
@@ -2849,7 +2985,7 @@ class SaveModelUnloadZ1View(APIView):
                         'tray_code': tray_code,
                         'tray_color': tray_color,
                         'num_trays': len(tray_data),
-                        'tray_data': tray_data,
+                        'tray_data': tray_data_with_sources,
                         'missing_qty': missing_qty,
                         'top_tray_remark': top_tray_remark,
                         'is_draft': is_draft,
@@ -2889,6 +3025,192 @@ class SubmitAllUnloadZ1View(APIView):
     POST /api/submit_all_unload_z1/
     Final submission: unlocks jig, marks JigCompleted as fully unloaded.
     """
+
+    def _build_lot_list_fields(self, lot_id, fallback_model_no=''):
+        plating_stk_no_list = []
+        polish_stk_no_list = []
+        version_list = []
+
+        try:
+            tsm = TotalStockModel.objects.filter(lot_id=lot_id).select_related('batch_id').first()
+            if tsm and tsm.batch_id:
+                mmc = ModelMasterCreation.objects.select_related('version').filter(
+                    id=tsm.batch_id.id
+                ).first()
+                if mmc:
+                    if mmc.plating_stk_no:
+                        plating_stk_no_list.append(mmc.plating_stk_no)
+                    if mmc.polishing_stk_no:
+                        polish_stk_no_list.append(mmc.polishing_stk_no)
+                    if mmc.version and hasattr(mmc.version, 'version_internal'):
+                        version_list.append(mmc.version.version_internal)
+
+            if not plating_stk_no_list and fallback_model_no:
+                plating_stk_no_list.append(str(fallback_model_no).strip())
+        except Exception as e:
+            logger.exception(
+                "SubmitAllUnloadZ1: failed building model list fields for lot_id=%s: %s",
+                lot_id,
+                e,
+            )
+
+        return plating_stk_no_list, polish_stk_no_list, version_list
+
+    def _build_combined_lot_list_fields(self, lot_ids, fallback_model_no=''):
+        plating_stk_no_list = []
+        polish_stk_no_list = []
+        version_list = []
+
+        for source_lot_id in _jul_ordered_unique(lot_ids):
+            plating_values, polish_values, version_values = self._build_lot_list_fields(
+                source_lot_id,
+                fallback_model_no,
+            )
+            plating_stk_no_list.extend(plating_values)
+            polish_stk_no_list.extend(polish_values)
+            version_list.extend(version_values)
+
+        return (
+            _jul_ordered_unique(plating_stk_no_list),
+            _jul_ordered_unique(polish_stk_no_list),
+            _jul_ordered_unique(version_list),
+        )
+
+    def _discover_related_sources(self, submitted_record, excluded_lot_ids):
+        if not submitted_record:
+            return []
+
+        excluded_lot_ids = set(excluded_lot_ids or [])
+        sources_by_lot = {}
+
+        def remember_source(lot_id, jig_completed_id=None, jig_id='', qty=0):
+            lot_id = str(lot_id or '').strip()
+            if not lot_id or lot_id in excluded_lot_ids or lot_id == submitted_record.lot_id:
+                return
+            sources_by_lot[lot_id] = {
+                'lot_id': lot_id,
+                'jig_completed_id': jig_completed_id,
+                'jig_id': str(jig_id or '').strip(),
+                'qty': int(qty or 0),
+            }
+
+        metadata = _jul_source_metadata_from_tray_data(submitted_record.tray_data)
+        for source in metadata.get('source_mappings', []) if isinstance(metadata, dict) else []:
+            if isinstance(source, dict):
+                remember_source(
+                    source.get('lot_id'),
+                    source.get('jig_completed_id'),
+                    source.get('jig_id'),
+                    source.get('qty'),
+                )
+
+        if sources_by_lot:
+            return list(sources_by_lot.values())
+
+        signature = _jul_submission_tray_signature(submitted_record.tray_data)
+        if not signature:
+            return []
+
+        candidates = JUSubmittedZ1.objects.filter(
+            model_no=submitted_record.model_no,
+            is_draft=False,
+        ).exclude(id=submitted_record.id)
+        for candidate in candidates:
+            if candidate.lot_id in excluded_lot_ids:
+                continue
+            if _jul_submission_tray_signature(candidate.tray_data) != signature:
+                continue
+            remember_source(
+                candidate.lot_id,
+                candidate.jig_completed_id,
+                candidate.jig_qr_id,
+                candidate.total_qty,
+            )
+
+        return list(sources_by_lot.values())
+
+    def _create_or_update_model_after_table(self, *, jc, jig_qr_id, source_lot_id, submitted_record,
+                                            fallback_qty, request_user, now, extra_sources=None):
+        model_no = submitted_record.model_no if submitted_record else ''
+        qty = submitted_record.total_qty if submitted_record else fallback_qty
+        qty = int(qty or 0)
+        extra_sources = extra_sources or []
+        source_lot_ids = _jul_ordered_unique(
+            [source_lot_id] + [source.get('lot_id') for source in extra_sources if isinstance(source, dict)]
+        )
+        source_jig_ids = _jul_ordered_unique(
+            [jig_qr_id or jc.lot_id] + [source.get('jig_id') for source in extra_sources if isinstance(source, dict)]
+        )
+        jig_qr_display = ', '.join(source_jig_ids) if source_jig_ids else (jig_qr_id or jc.lot_id)
+
+        plating_stk_no_list, polish_stk_no_list, version_list = self._build_combined_lot_list_fields(
+            source_lot_ids,
+            model_no,
+        )
+
+        after_table = JigUnloadAfterTable.objects.filter(
+            combine_lot_ids__contains=[source_lot_id]
+        ).order_by('-id').first()
+        action = 'updated' if after_table else 'created'
+
+        if after_table:
+            changed_fields = []
+            if after_table.jig_qr_id != jig_qr_display:
+                after_table.jig_qr_id = jig_qr_display
+                changed_fields.append('jig_qr_id')
+            if after_table.combine_lot_ids != source_lot_ids:
+                after_table.combine_lot_ids = source_lot_ids
+                changed_fields.append('combine_lot_ids')
+            if after_table.total_case_qty != qty:
+                after_table.total_case_qty = qty
+                changed_fields.append('total_case_qty')
+            if not after_table.last_process_module:
+                after_table.last_process_module = 'Jig Unloading'
+                changed_fields.append('last_process_module')
+            if not after_table.Un_loaded_date_time:
+                after_table.Un_loaded_date_time = now
+                changed_fields.append('Un_loaded_date_time')
+            if plating_stk_no_list and after_table.plating_stk_no_list != plating_stk_no_list:
+                after_table.plating_stk_no_list = plating_stk_no_list
+                changed_fields.append('plating_stk_no_list')
+            if polish_stk_no_list and after_table.polish_stk_no_list != polish_stk_no_list:
+                after_table.polish_stk_no_list = polish_stk_no_list
+                changed_fields.append('polish_stk_no_list')
+            if version_list and after_table.version_list != version_list:
+                after_table.version_list = version_list
+                changed_fields.append('version_list')
+            if changed_fields:
+                after_table.save(update_fields=list(set(changed_fields)))
+        else:
+            after_table = JigUnloadAfterTable(
+                jig_qr_id=jig_qr_display,
+                combine_lot_ids=source_lot_ids,
+                total_case_qty=qty,
+                selected_user=request_user if request_user.is_authenticated else None,
+                Un_loaded_date_time=now,
+                last_process_module='Jig Unloading',
+                plating_stk_no_list=plating_stk_no_list,
+                polish_stk_no_list=polish_stk_no_list,
+                version_list=version_list,
+            )
+            after_table.save()
+
+        logger.info(
+            "Jig Unloading Submit All per-model Nickel Wiping source %s: "
+            "jig_id=%s model_no=%s source_lot_ids=%s generated_lot_id=%s "
+            "unload_lot_id=%s qty=%s after_table_id=%s",
+            action,
+            jig_qr_display,
+            model_no,
+            source_lot_ids,
+            after_table.lot_id,
+            after_table.unload_lot_id,
+            qty,
+            after_table.id,
+        )
+
+        return after_table, qty, model_no, action
+
     def post(self, request):
         jig_completed_id = request.data.get('jig_completed_id')
         if not jig_completed_id:
@@ -2905,15 +3227,17 @@ class SubmitAllUnloadZ1View(APIView):
         _alloc = draft_data.get('multi_model_allocation', [])
         lot_id_quantities = draft_data.get('lot_id_quantities', {})
         if _alloc:
-            all_lot_ids = set(a['lot_id'] for a in _alloc if a.get('lot_id'))
+            all_lot_ids_ordered = [a['lot_id'] for a in _alloc if a.get('lot_id')]
             # Build lot_id_quantities from allocation for qty lookup
             if not lot_id_quantities:
                 lot_id_quantities = {a['lot_id']: a.get('allocated_qty', 0) for a in _alloc}
         elif lot_id_quantities:
-            all_lot_ids = set(lot_id_quantities.keys())
+            all_lot_ids_ordered = list(lot_id_quantities.keys())
         else:
-            all_lot_ids = {jc.lot_id}
+            all_lot_ids_ordered = [jc.lot_id]
             lot_id_quantities = {jc.lot_id: jc.updated_lot_qty or 0}
+        all_lot_ids_ordered = list(dict.fromkeys(all_lot_ids_ordered))
+        all_lot_ids = set(all_lot_ids_ordered)
         submitted_lot_ids = set(
             JUSubmittedZ1.objects.filter(
                 jig_completed_id=jig_completed_id, is_draft=False
@@ -2926,158 +3250,148 @@ class SubmitAllUnloadZ1View(APIView):
                 'error': f'Not all models have been unloaded. Missing: {list(missing)}'
             }, status=400)
 
-        # Mark JigCompleted as fully unloaded
-        jc.last_process_module = 'Jig Unloading'
-        jc.save(update_fields=['last_process_module'])
-
-        # Unlock the jig for reuse in Jig Loading
-        jig_qr_id = jc.jig_id
-        if jig_qr_id:
-            Jig.objects.filter(jig_qr_id=jig_qr_id).update(
-                is_loaded=False,
-                current_user=None,
-                locked_at=None,
-                drafted=False,
-                batch_id=None,
-                lot_id=None,
-            )
-
-        # Also check and free merged JigCompleted records whose lots were all submitted
-        # via the merged_lots mechanism (e.g. Add Model across lots).
-        merged_jig_ids = request.data.get('merged_jig_completed_ids', [])
-        for m_jc_id in merged_jig_ids:
-            try:
-                m_jc = JigCompleted.objects.get(id=m_jc_id)
-                if m_jc.last_process_module == 'Jig Unloading':
-                    continue  # Already freed
-                m_dd = m_jc.draft_data or {}
-                m_alloc = m_dd.get('multi_model_allocation', []) if isinstance(m_dd, dict) else []
-                m_liq = m_dd.get('lot_id_quantities', {}) if isinstance(m_dd, dict) else {}
-                if m_alloc:
-                    m_all_lids = set(a['lot_id'] for a in m_alloc if a.get('lot_id'))
-                elif m_liq:
-                    m_all_lids = set(m_liq.keys())
-                else:
-                    m_all_lids = {m_jc.lot_id}
-                m_submitted = set(
-                    JUSubmittedZ1.objects.filter(
-                        jig_completed_id=m_jc_id, is_draft=False
-                    ).values_list('lot_id', flat=True)
-                )
-                if m_all_lids and m_all_lids.issubset(m_submitted):
-                    m_jc.last_process_module = 'Jig Unloading'
-                    m_jc.save(update_fields=['last_process_module'])
-                    m_jig_qr = m_jc.jig_id
-                    if m_jig_qr:
-                        Jig.objects.filter(jig_qr_id=m_jig_qr).update(
-                            is_loaded=False, current_user=None, locked_at=None,
-                            drafted=False, batch_id=None, lot_id=None,
-                        )
-            except JigCompleted.DoesNotExist:
-                pass
-
-        # Create ONE JigUnloadAfterTable record per jig (all models combined)
-        # This ensures multi-model jigs display ALL models in the completed table
         from django.utils import timezone
-
-        all_combine_lot_ids = list(all_lot_ids)
-        total_qty = 0
-        for lid in all_lot_ids:
-            sub = JUSubmittedZ1.objects.filter(
-                jig_completed_id=jig_completed_id, lot_id=lid, is_draft=False
-            ).first()
-            total_qty += (sub.total_qty if sub else lot_id_quantities.get(lid, 0))
-
-        # Idempotency: check if a record already exists for any of these lot_ids
-        existing = None
-        for lid in all_combine_lot_ids:
-            existing = JigUnloadAfterTable.objects.filter(
-                combine_lot_ids__contains=[lid]
-            ).first()
-            if existing:
-                break
-
-        if existing:
-            after_table = existing
-            changed_fields = []
-            if not existing.last_process_module:
-                existing.last_process_module = 'Jig Unloading'
-                changed_fields.append('last_process_module')
-            if not existing.Un_loaded_date_time:
-                existing.Un_loaded_date_time = timezone.now()
-                changed_fields.append('Un_loaded_date_time')
-            # Ensure combine_lot_ids has ALL lot_ids
-            if set(all_combine_lot_ids) != set(existing.combine_lot_ids or []):
-                existing.combine_lot_ids = all_combine_lot_ids
-                changed_fields.append('combine_lot_ids')
-            # Always update total_case_qty if it changed (e.g. Add-Model merge increases qty)
-            if existing.total_case_qty != total_qty:
-                existing.total_case_qty = total_qty
-                changed_fields.append('total_case_qty')
-            if changed_fields:
-                existing.save(update_fields=list(set(changed_fields)))
-        else:
-            # Pre-populate list fields from ALL lot_ids
-            plating_stk_no_list = []
-            polish_stk_no_list = []
-            version_list = []
-            for lid in all_combine_lot_ids:
-                try:
-                    tsm = TotalStockModel.objects.filter(lot_id=lid).select_related('batch_id').first()
-                    if tsm and tsm.batch_id:
-                        mmc = ModelMasterCreation.objects.select_related('version').filter(
-                            id=tsm.batch_id.id
-                        ).first()
-                        if mmc:
-                            if mmc.plating_stk_no:
-                                plating_stk_no_list.append(mmc.plating_stk_no)
-                            if mmc.polishing_stk_no:
-                                polish_stk_no_list.append(mmc.polishing_stk_no)
-                            if mmc.version and hasattr(mmc.version, 'version_internal'):
-                                version_list.append(mmc.version.version_internal)
-                except Exception as e:
-                    print(f"⚠️ Error populating lists for {lid}: {e}")
-
-            after_table = JigUnloadAfterTable(
-                jig_qr_id=jig_qr_id or jc.lot_id,
-                combine_lot_ids=all_combine_lot_ids,
-                total_case_qty=total_qty,
-                selected_user=request.user if request.user.is_authenticated else None,
-                Un_loaded_date_time=timezone.now(),
-                last_process_module='Jig Unloading',
-                plating_stk_no_list=plating_stk_no_list,
-                polish_stk_no_list=polish_stk_no_list,
-                version_list=version_list,
+        now = timezone.now()
+        submitted_by_lot = {
+            sub.lot_id: sub
+            for sub in JUSubmittedZ1.objects.filter(
+                jig_completed_id=jig_completed_id,
+                lot_id__in=all_lot_ids_ordered,
+                is_draft=False,
             )
-            after_table.save()
+        }
 
-        # ✅ ERR2 FIX: Update TotalStockModel records to reflect Jig Unloading completion
-        # This ensures Brass Audit Completed table shows correct "Current Stage" after items are unloaded
-        TotalStockModel.objects.filter(lot_id__in=all_lot_ids).update(
-            last_process_module='Jig Unloading',
-            next_process_module='Nickel Inspection',
-            last_process_date_time=timezone.now()
+        related_sources_by_lot = {
+            lot_id: self._discover_related_sources(submitted_record, all_lot_ids)
+            for lot_id, submitted_record in submitted_by_lot.items()
+        }
+        moved_lot_ids = set(all_lot_ids)
+        for related_sources in related_sources_by_lot.values():
+            for related_source in related_sources:
+                if related_source.get('lot_id'):
+                    moved_lot_ids.add(related_source['lot_id'])
+
+        logger.info(
+            "Jig Unloading Submit All started: jig_completed_id=%s jig_id=%s lot_ids=%s",
+            jig_completed_id,
+            jc.jig_id or jc.lot_id,
+            all_lot_ids_ordered,
         )
-        print(f"✅ Updated {len(all_lot_ids)} TotalStockModel records: last_process_module='Jig Unloading', next_process_module='Nickel Inspection'")
 
-        # Build response records
-        created_records = []
-        for lid in all_lot_ids:
-            sub = JUSubmittedZ1.objects.filter(
-                jig_completed_id=jig_completed_id, lot_id=lid, is_draft=False
-            ).first()
-            created_records.append({
-                'lot_id': lid,
-                'model_no': sub.model_no if sub else '',
-                'unload_lot_id': after_table.unload_lot_id,
-                'qty': sub.total_qty if sub else lot_id_quantities.get(lid, 0),
-            })
+        with transaction.atomic():
+            # Mark JigCompleted as fully unloaded
+            jc.last_process_module = 'Jig Unloading'
+            jc.save(update_fields=['last_process_module'])
+
+            # Unlock the jig for reuse in Jig Loading and increment cycle count
+            jig_qr_id = jc.jig_id
+            if jig_qr_id:
+                from django.db.models import F
+                Jig.objects.filter(jig_qr_id=jig_qr_id).update(
+                    is_loaded=False,
+                    occupied_flag=False,
+                    current_user=None,
+                    locked_at=None,
+                    drafted=False,
+                    batch_id=None,
+                    lot_id=None,
+                    cycle_count=F('cycle_count') + 1,
+                )
+                logger.info(
+                    "Zone 1 Jig Released: jig_qr_id=%s marked as free and cycle_count incremented",
+                    jig_qr_id,
+                )
+
+            # Also check and free merged JigCompleted records whose lots were all submitted
+            # via the merged_lots mechanism (e.g. Add Model across lots).
+            merged_jig_ids = set(str(value) for value in request.data.get('merged_jig_completed_ids', []) if value)
+            for related_sources in related_sources_by_lot.values():
+                for related_source in related_sources:
+                    related_jig_completed_id = related_source.get('jig_completed_id')
+                    if related_jig_completed_id:
+                        merged_jig_ids.add(str(related_jig_completed_id))
+            for m_jc_id in merged_jig_ids:
+                try:
+                    m_jc = JigCompleted.objects.get(id=m_jc_id)
+                    if m_jc.last_process_module == 'Jig Unloading':
+                        continue  # Already freed
+                    m_dd = m_jc.draft_data or {}
+                    m_alloc = m_dd.get('multi_model_allocation', []) if isinstance(m_dd, dict) else []
+                    m_liq = m_dd.get('lot_id_quantities', {}) if isinstance(m_dd, dict) else {}
+                    if m_alloc:
+                        m_all_lids = set(a['lot_id'] for a in m_alloc if a.get('lot_id'))
+                    elif m_liq:
+                        m_all_lids = set(m_liq.keys())
+                    else:
+                        m_all_lids = {m_jc.lot_id}
+                    m_submitted = set(
+                        JUSubmittedZ1.objects.filter(
+                            jig_completed_id=m_jc_id, is_draft=False
+                        ).values_list('lot_id', flat=True)
+                    )
+                    if m_all_lids and m_all_lids.issubset(m_submitted):
+                        m_jc.last_process_module = 'Jig Unloading'
+                        m_jc.save(update_fields=['last_process_module'])
+                        m_jig_qr = m_jc.jig_id
+                        if m_jig_qr:
+                            from django.db.models import F
+                            Jig.objects.filter(jig_qr_id=m_jig_qr).update(
+                                is_loaded=False, occupied_flag=False, current_user=None, locked_at=None,
+                                drafted=False, batch_id=None, lot_id=None, cycle_count=F('cycle_count') + 1,
+                            )
+                            logger.info(
+                                "Zone 1 Merged Jig Released: jig_qr_id=%s marked as free and cycle_count incremented",
+                                m_jig_qr,
+                            )
+                except JigCompleted.DoesNotExist:
+                    pass
+
+            # Submit All must create one downstream Nickel Wiping source row per model lot.
+            created_records = []
+            for lid in all_lot_ids_ordered:
+                sub = submitted_by_lot.get(lid)
+                related_sources = related_sources_by_lot.get(lid, [])
+                after_table, qty, model_no, action = self._create_or_update_model_after_table(
+                    jc=jc,
+                    jig_qr_id=jig_qr_id,
+                    source_lot_id=lid,
+                    submitted_record=sub,
+                    fallback_qty=lot_id_quantities.get(lid, 0),
+                    request_user=request.user,
+                    now=now,
+                    extra_sources=related_sources,
+                )
+                created_records.append({
+                    'source_lot_id': lid,
+                    'source_lot_ids': _jul_ordered_unique([lid] + [source.get('lot_id') for source in related_sources]),
+                    'lot_id': lid,
+                    'generated_lot_id': after_table.lot_id,
+                    'model_no': model_no,
+                    'unload_lot_id': after_table.unload_lot_id,
+                    'qty': qty,
+                    'action': action,
+                })
+
+            # Update TotalStockModel records to reflect Jig Unloading completion
+            updated_count = TotalStockModel.objects.filter(lot_id__in=moved_lot_ids).update(
+                last_process_module='Jig Unloading',
+                next_process_module='Nickel Inspection',
+                last_process_date_time=now
+            )
+            logger.info(
+                "Jig Unloading Submit All stock update: jig_id=%s updated_total_stock_rows=%s lot_ids=%s",
+                jig_qr_id or jc.lot_id,
+                updated_count,
+                sorted(moved_lot_ids),
+            )
+
+        first_record = created_records[0] if created_records else {}
 
         return Response({
             'success': True,
             'message': 'Jig unloading submitted successfully. Jig unlocked for reuse.',
             'records': created_records,
-            'unload_lot_id': after_table.unload_lot_id or '',
+            'unload_lot_id': first_record.get('unload_lot_id') or '',
         })
 
 
@@ -3453,19 +3767,66 @@ def jig_unload_view_tray_list_z1(request):
         if not record:
             return JsonResponse({'success': False, 'error': f'Record not found for lot_id: {lot_id}'}, status=404)
 
-        combine_lot_ids = record.combine_lot_ids or []
+        combine_lot_ids = [_jul_extract_source_lot_id(lot_id) for lot_id in (record.combine_lot_ids or [])]
+        combine_lot_ids = _jul_ordered_unique(combine_lot_ids)
         if not combine_lot_ids:
             return JsonResponse({'success': False, 'error': 'No combine_lot_ids found'}, status=404)
 
         # Primary source: JUSubmittedZ1 tray_data (Z1 unload modal saves here)
         tray_list = []
-        subs = JUSubmittedZ1.objects.filter(lot_id__in=combine_lot_ids, is_draft=False).order_by('id')
+        subs = list(JUSubmittedZ1.objects.filter(lot_id__in=combine_lot_ids, is_draft=False).order_by('id'))
+        source_summary_by_key = {}
+
         for sub in subs:
+            metadata = _jul_source_metadata_from_tray_data(sub.tray_data)
+            mappings = metadata.get('source_mappings', []) if isinstance(metadata, dict) else []
+            if mappings:
+                for mapping in mappings:
+                    if not isinstance(mapping, dict):
+                        continue
+                    source_lot_id = str(mapping.get('lot_id') or '').strip()
+                    source_jig_id = str(mapping.get('jig_id') or sub.jig_qr_id or '').strip()
+                    if not source_lot_id and not source_jig_id:
+                        continue
+                    source_summary_by_key[(source_jig_id, source_lot_id)] = {
+                        'jig_id': source_jig_id or 'N/A',
+                        'lot_id': source_lot_id or sub.lot_id,
+                        'qty': int(mapping.get('qty') or 0),
+                    }
+            else:
+                source_summary_by_key[(sub.jig_qr_id or 'N/A', sub.lot_id)] = {
+                    'jig_id': sub.jig_qr_id or 'N/A',
+                    'lot_id': sub.lot_id,
+                    'qty': int(sub.total_qty or 0),
+                }
+
+        canonical_subs = []
+        exact_total_matches = [
+            sub for sub in subs
+            if int(sub.total_qty or 0) == int(record.total_case_qty or 0)
+        ]
+        if exact_total_matches:
+            canonical_subs = [exact_total_matches[0]]
+        else:
+            seen_signatures = set()
+            for sub in subs:
+                signature = _jul_submission_tray_signature(sub.tray_data)
+                if signature and signature in seen_signatures:
+                    continue
+                seen_signatures.add(signature)
+                canonical_subs.append(sub)
+
+        source_jig_display = ', '.join(_jul_ordered_unique(
+            summary.get('jig_id') for summary in source_summary_by_key.values()
+        ))
+
+        for sub in canonical_subs:
             for entry in (sub.tray_data or []):
                 tray_list.append({
                     'tray_id': entry.get('tray_id', ''),
                     'tray_quantity': entry.get('qty', 0),
                     'top_tray': entry.get('is_top_tray', False),
+                    'source_jig': source_jig_display or sub.jig_qr_id or 'N/A',
                 })
 
         # Fallback: JigUnload_TrayId (old Zone 2 flow)
@@ -3476,9 +3837,15 @@ def jig_unload_view_tray_list_z1(request):
                     'tray_id': tray.tray_id,
                     'tray_quantity': tray.tray_qty,
                     'top_tray': tray.top_tray,
+                    'source_jig': source_jig_display or 'N/A',
                 })
 
-        return JsonResponse({'success': True, 'trays': tray_list})
+        return JsonResponse({
+            'success': True,
+            'combine_lot_ids': combine_lot_ids,
+            'jig_summary': list(source_summary_by_key.values()),
+            'trays': tray_list,
+        })
 
     except Exception as e:
         return JsonResponse({'success': False, 'error': str(e)}, status=500)

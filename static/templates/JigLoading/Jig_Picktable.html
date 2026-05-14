@@ -212,6 +212,33 @@ body.sidebar-icon-only #order-listing td:nth-child(3) {
   text-transform: uppercase;
   letter-spacing: 0.3px;
 }
+
+/* ===== FIX: Delink Checkbox Cell & Checkbox Interaction ===== */
+/* Ensure checkbox cells don't capture clicks - only checkboxes do */
+#delinkPanelTableBody td:nth-child(2) {
+  pointer-events: none !important;
+  cursor: default !important;
+}
+
+/* Enable clicks only on the checkbox itself */
+#delinkPanelTableBody td:nth-child(2) input[type="checkbox"] {
+  pointer-events: auto !important;
+  cursor: pointer !important;
+  position: relative;
+  z-index: 10;
+}
+
+/* Ensure checkboxes work even in highlighted/active rows */
+.active-row td:nth-child(2) input[type="checkbox"]:not(:disabled):not(.locked) {
+  pointer-events: auto !important;
+  cursor: pointer !important;
+}
+
+/* Visual feedback when hovering over enabled checkboxes */
+#delinkPanelTableBody input.delink-row-checkbox:not(:disabled):not(.locked):hover {
+  transform: scale(1.1);
+  transition: transform 0.1s ease;
+}
 </style>
 
 <div class="content-wrapper">
@@ -1983,16 +2010,28 @@ document.addEventListener('DOMContentLoaded', function () {
           // 2. Checkbox
           var td2 = document.createElement('td');
           td2.style.textAlign = 'center';
+          td2.style.pointerEvents = 'none'; // Disable cell-level clicks
           if (row.is_checkbox_enabled) {
             var cb = document.createElement('input');
             cb.type = 'checkbox';
             cb.className = 'delink-row-checkbox';
-            cb.style.cssText = 'width:14px;height:14px;accent-color:#028084;cursor:pointer;';
+            cb.style.cssText = 'width:14px;height:14px;accent-color:#028084;cursor:pointer;pointer-events:auto;'; // Enable checkbox clicks only
             cb.dataset.rowIndex = idx;
             cb.dataset.trayId = row.tray_id || '';
             if (row.checked) { cb.checked = true; }
             if (row.locked) { cb.disabled = true; cb.classList.add('locked'); }
             if (row.selectable === false) { cb.disabled = true; }
+            
+            // Add click event listener with stopPropagation to prevent cell-level interference
+            cb.addEventListener('click', function(e) {
+              e.stopPropagation();
+              // Prevent action if checkbox is locked or disabled
+              if (this.disabled || this.classList.contains('locked')) {
+                e.preventDefault();
+                return false;
+              }
+            });
+            
             td2.appendChild(cb);
           }
           tr.appendChild(td2);
@@ -2223,7 +2262,8 @@ document.addEventListener('DOMContentLoaded', function () {
       // Select-all: synchronous slot tracking with allocation persistence
       var selectAllDelink = document.getElementById('delinkSelectAll');
       if (selectAllDelink) {
-        selectAllDelink.onclick = function() {
+        selectAllDelink.onclick = function(e) {
+          e.stopPropagation(); // Prevent event bubbling
           var isChecked = this.checked;
           var allCbs = Array.from(dBody.querySelectorAll('.delink-row-checkbox:not(.locked):not(:disabled)'));
           if (!isChecked) {
@@ -2275,8 +2315,11 @@ document.addEventListener('DOMContentLoaded', function () {
       }
       // Attach change handler per checkbox → smart routing
       dBody.querySelectorAll('.delink-row-checkbox:not(.locked)').forEach(function(cb) {
-        cb.addEventListener('change', function() {
-          if (this.checked) {
+        cb.addEventListener('change', function(e) {
+          e.stopPropagation(); // Prevent event bubbling to parent elements
+          
+          // Only process if checkbox is actually checked and not locked/disabled
+          if (this.checked && !this.disabled && !this.classList.contains('locked')) {
             _routeCheckboxTray(this);
           }
         });
