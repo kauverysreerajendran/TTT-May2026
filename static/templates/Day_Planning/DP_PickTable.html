@@ -330,6 +330,81 @@ display: inline-flex;
   color: #e5fcff !important;
 }
 
+#order-listing .dp-sno-cell {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: flex-start !important;
+  gap: 4px !important;
+  width: max-content !important;
+  max-width: 100% !important;
+  white-space: nowrap !important;
+  overflow: visible !important;
+}
+
+#order-listing tbody td:first-child {
+  padding-left: 4px !important;
+  padding-right: 4px !important;
+  text-align: left !important;
+  overflow: visible !important;
+}
+
+#order-listing .dp-sno-cell .hold-toggle-switch {
+  width: 32px !important;
+  height: 16px !important;
+  flex: 0 0 32px !important;
+  margin: 0 !important;
+  display: inline-flex !important;
+  align-items: center !important;
+}
+
+#order-listing .dp-sno-cell .hold-slider {
+  width: 32px !important;
+  height: 16px !important;
+  display: block !important;
+  border-radius: 999px !important;
+  margin: 0 !important;
+}
+
+#order-listing .dp-sno-cell .hold-slider::before {
+  display: none !important;
+}
+
+#order-listing .dp-sno-cell .hold-slider::after {
+  width: 14px !important;
+  height: 14px !important;
+  top: 1px !important;
+  left: 1px !important;
+}
+
+#order-listing .dp-sno-cell .hold-toggle-switch input[type="checkbox"]:checked + .hold-slider::after {
+  left: 17px !important;
+}
+
+#order-listing .dp-sno-cell .hold-remark-icon {
+  flex: 0 0 14px !important;
+  width: 14px !important;
+  height: 14px !important;
+  margin: 0 !important;
+  align-items: center !important;
+  justify-content: center !important;
+  line-height: 1 !important;
+}
+
+#order-listing .dp-sno-cell .hold-remark-icon img {
+  width: 12px !important;
+  height: 12px !important;
+  display: block !important;
+}
+
+#order-listing .dp-sno-cell .sno-value {
+  flex: 0 0 auto !important;
+  min-width: 18px !important;
+  margin: 0 !important;
+  line-height: 1 !important;
+  text-align: left !important;
+  font-weight: 600 !important;
+}
+
 @media (max-width: 768px) {
   .dp-title-bar {
     align-items: flex-start;
@@ -970,10 +1045,10 @@ box-shadow: 2px 0 8px rgba(0,0,0,0.04);
                   <span class="dp-title-left">Day Planning Pick Table</span>
                   <span id="scanStatusMessage" style="display: none; margin-left: 12px; vertical-align: middle; color: #28a745; font-size: 15px; font-weight: 700;">PLEASE SCAN</span>
                 </h5>
-                <button type="button" id="howItWorksBtn" class="dp-how-works-btn" aria-label="Open quick help information">
+<!--                 <button type="button" id="howItWorksBtn" class="dp-how-works-btn" aria-label="Open quick help information">
                   <img src="{% static 'assets/icons/45.png' %}" alt="Quick Help" />
                   Quick Help
-                </button>
+                </button> -->
               </div>
 
               <div id="howItWorksPanel" class="dp-how-panel" aria-hidden="true">
@@ -1137,7 +1212,7 @@ box-shadow: 2px 0 8px rgba(0,0,0,0.04);
         data-batch-id="{{ data.batch_id }}"
         data-model-no="{{ data.model_stock_no__model_no }}">
       <td class="{% if not is_admin and not visible_headings|get_item:'S.No' %}blurred-cell{% endif %}{% if data.hold_lot %} row-inactive-blur{% endif %}">
-        <span style="display:flex; align-items:center; gap:3px;">
+        <span class="dp-sno-cell">
           {% if is_admin %}
             <label class="hold-toggle-switch" style="margin-bottom:0;">
               {% if not data.hold_lot %}
@@ -1152,7 +1227,7 @@ box-shadow: 2px 0 8px rgba(0,0,0,0.04);
                   style="display:{% if data.hold_lot or data.release_lot %}inline-block{% else %}none{% endif %}; cursor:pointer;" 
                   title="{% if data.holding_reason %}Holding Reason: {{ data.holding_reason }}{% endif %}{% if data.holding_reason and data.release_reason %}&#10;{% endif %}{% if data.release_reason %}Release Reason: {{ data.release_reason }}{% endif %}">
               {% if data.hold_lot or data.release_lot %}
-                <img src="{% static 'assets/icons/view2.png' %}" alt="Remark" style="width:12px; height:12px;" />
+                <img src="{% static 'assets/icons/view.png' %}" alt="Remark" style="width:12px; height:12px;" />
               {% endif %}
             </span>
           {% else %}
@@ -1160,7 +1235,7 @@ box-shadow: 2px 0 8px rgba(0,0,0,0.04);
               <span class="hold-remark-icon" 
                     style="display:inline-block; cursor:pointer;" 
                     title="{% if data.holding_reason %}Holding Reason: {{ data.holding_reason }}{% endif %}{% if data.holding_reason and data.release_reason %}&#10;{% endif %}{% if data.release_reason %}Release Reason: {{ data.release_reason }}{% endif %}">
-                <img src="{% static 'assets/icons/view2.png' %}" alt="View Reason" style="width:12px; height:12px;" />
+                <img src="{% static 'assets/icons/view.png' %}" alt="View Reason" style="width:12px; height:12px;" />
               </span>
             {% endif %}
           {% endif %}
@@ -6084,7 +6159,7 @@ for (let i = 0; i < row.children.length; i++) {
           // Show and update the remark icon
           if (icon) {
             icon.style.display = 'inline-block';
-            icon.innerHTML = `<img src="{% static 'assets/icons/view2.png' %}" alt="Remark" style="width:12px; height:12px;" />`;
+            icon.innerHTML = `<img src="{% static 'assets/icons/view.png' %}" alt="Remark" style="width:12px; height:12px;" />`;
             icon.setAttribute('title', 'Holding Reason: ' + remark);          }
         } else {
           // Unhold the row

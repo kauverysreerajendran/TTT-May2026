@@ -11,6 +11,7 @@ from IQF.models import IQF_Rejection_ReasonStore, IQF_Accepted_TrayScan, IQF_Acc
 from InputScreening.models import IP_RejectionGroup, IP_Accepted_TrayScan, IP_Rejection_ReasonStore, IP_Rejected_TrayScan ,IP_Accepted_TrayID_Store
 from Jig_Loading.models import *
 from Brass_QC.models import Brass_QC_Rejection_Table, Brass_QC_Rejection_ReasonStore, Brass_QC_Rejected_TrayScan, Brass_Qc_Accepted_TrayScan, Brass_Qc_Accepted_TrayID_Store
+from modelmasterapp.tray_code_mapping import TRAY_CODE_CHOICES
 
 
 from django.db import models
@@ -122,6 +123,13 @@ class ModelMaster(models.Model):
     ep_bath_type = models.CharField(max_length=100)
     tray_type = models.ForeignKey(TrayType, on_delete=models.SET_NULL, null=True, blank=True)
     tray_capacity = models.IntegerField(null=True, blank=True)
+    tray_code = models.CharField(
+        max_length=5,
+        choices=TRAY_CODE_CHOICES,
+        null=True,
+        blank=True,
+        help_text="Nickel tray code for this model (NR, ND, NB, NL, JR, JD, JB, JL)",
+    )
     images = models.ManyToManyField(ModelImage, blank=True)  # Allows multiple images
     vendor_internal = models.ForeignKey(Vendor, on_delete=models.SET_NULL, null=True, blank=True)
     brand = models.CharField(max_length=100,null=True, blank=True)

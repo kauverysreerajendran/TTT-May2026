@@ -484,28 +484,63 @@
    }
    .uc-radio-opt input { accent-color: #028084; }
    .uc-checkbox-grid {
-     display: grid;
-     grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-     gap: 0.45rem 0.7rem;
-     padding: 0.55rem 0.6rem;
+     display: flex;
+     flex-wrap: wrap;
+     gap: 0.4rem 0.45rem;
+     padding: 0.5rem 0.6rem;
      min-height: 42px;
-     border: 1px solid #d1d5db;
-     border-radius: 6px;
-     background: #fff;
+     border: 1px solid #e2e8f0;
+     border-radius: 8px;
+     background: #f8fafc;
    }
+   /* User category minimal card chips */
    .uc-checkbox-opt {
      display: flex;
      align-items: center;
-     gap: 0.45rem;
-     min-width: 0;
-     margin: 0;
-     color: #334155;
-     font-size: 0.82rem;
-     font-weight: 500;
-     line-height: 1.3;
+     gap: 0.32rem;
+     padding: 0.22rem 0.55rem 0.22rem 0.42rem;
+     border-radius: 6px;
+     border: 1.5px solid var(--uc-border, #cbd5e1);
+     background: var(--uc-bg, #fff);
+     color: var(--uc-text, #475569);
+     font-size: 0.79rem;
+     font-weight: 400;
+     line-height: 1.35;
      cursor: pointer;
+     user-select: none;
+     transition: border-color 0.15s, box-shadow 0.15s, opacity 0.15s;
+     white-space: nowrap;
+     position: relative;
    }
-   .uc-checkbox-opt input,
+  .uc-checkbox-opt:hover:not(.uc-admin-disabled):not(.uc-module-disabled) {
+     border-color: var(--uc-accent, #94a3b8);
+     box-shadow: 0 1px 4px rgba(0,0,0,0.07);
+   }
+   /* No background color change on select — only green tick appears */
+   .uc-tick {
+     display: none;
+     color: #16a34a;
+     font-size: 0.82rem;
+     font-weight: 700;
+     line-height: 1;
+     margin-right: 0.05rem;
+   }
+   .uc-checkbox-opt.uc-is-checked .uc-tick { display: inline; }
+   /* Disabled state: fade only the checkbox, keep the light card color */
+   .uc-checkbox-opt.uc-admin-disabled {
+     cursor: not-allowed;
+   }
+   .uc-checkbox-opt.uc-module-disabled { cursor: not-allowed; }
+   .uc-checkbox-opt.uc-admin-disabled input[type="checkbox"],
+   .uc-checkbox-opt.uc-module-disabled input[type="checkbox"] { opacity: 0.35; }
+   .uc-checkbox-opt input[type="checkbox"] {
+     flex: 0 0 auto;
+     width: 0.82rem;
+     height: 0.82rem;
+     margin: 0;
+     accent-color: #16a34a;
+   }
+   .uc-checkbox-opt span.uc-name { min-width: 0; }
    .module-check-tile input {
      flex: 0 0 auto;
      width: 1rem;
@@ -513,14 +548,49 @@
      margin: 0;
      accent-color: #028084;
    }
-   .uc-checkbox-opt span,
    .module-check-tile span {
      min-width: 0;
      overflow-wrap: anywhere;
    }
    .uc-checkbox-empty {
-     color: #64748b;
-     font-size: 0.82rem;
+     color: #94a3b8;
+     font-size: 0.79rem;
+   }
+   /* Clear button inside category grid */
+   .uc-clear-btn {
+     display: inline-flex;
+     align-items: center;
+     gap: 0.18rem;
+     background: none;
+     border: 1px solid #e2e8f0;
+     border-radius: 5px;
+     color: #94a3b8;
+     font-size: 0.72rem;
+     padding: 0.12rem 0.48rem;
+     cursor: pointer;
+     transition: color 0.15s, border-color 0.15s;
+     margin-left: auto;
+   }
+   .uc-clear-btn:hover { color: #dc2626; border-color: #fca5a5; }
+   /* Section labels inside the category grid */
+   .uc-group-label {
+     width: 100%;
+     font-size: 0.70rem;
+     font-weight: 500;
+     color: #94a3b8;
+     text-transform: uppercase;
+     letter-spacing: 0.06em;
+     padding: 0.15rem 0 0.1rem 0.1rem;
+     margin-top: 0.25rem;
+   }
+   .uc-group-label:first-child { margin-top: 0; }
+   /* Row of chips inside a group */
+   .uc-group-row {
+     display: flex;
+     flex-wrap: wrap;
+     gap: 0.38rem 0.42rem;
+     width: 100%;
+     margin-bottom: 0.2rem;
    }
    .module-check-tile {
      display: flex;
@@ -1222,26 +1292,6 @@
    .action-btn:hover {
    transform: scale(1.1);
    }
-   .new-user-highlight {
-    background-color: #ffff77 !important;
-    transition: background-color 0.5s ease;
-   }
-   .action-btn.submit-flow {
-    background: #a6ff96;
-    padding: 0.35rem 0.75rem;
-    font-weight: 600;
-    font-size: 0.8rem;
-    display: inline-flex;
-    align-items: center;
-    gap: 0.3em;
-    border-radius: 4px;
-    border: none;
-    cursor: pointer;
-   }
-   .action-btn.submit-flow:hover {
-    background: #9cff8a;
-    transform: scale(1.05);
-   }
    .empty-state {
    text-align: center;
    padding: 3rem;
@@ -1762,8 +1812,6 @@
                     <th>Full Name</th>
                     <th>Email</th>
                     <!-- <th>User Category</th> -->
-                    <th>Department</th>
-                    <th>Role</th>
                     <th>Manager</th>
                     <th>Status</th>
                     <!-- <th>Modules</th> -->
@@ -1899,48 +1947,235 @@
      }
    }
 
-   function renderUserCategoryCheckboxes(groups) {
-     const grid = document.getElementById("userCategoryCheckboxGrid");
+   // Groups never shown in UI
+   const UC_HIDDEN_GROUPS = new Set([
+     'Recovery DP User', 'Recovery IS User', 'Recovery BQC User',
+     'Recovery IQF User', 'Recovery BA User'
+   ]);
+
+   // Display name map: DB group name → human-readable label
+   const UC_DISPLAY_MAP = {
+     'Admin':                          'Admin',
+     'Normal User':                    'Normal User',
+     'DP User':                        'Day Planning User',
+     'IS User':                        'Input Screening User',
+     'BQC User':                       'Brass QC User',
+     'IQF User':                       'IQF User',
+     'BA User':                        'Brass Audit User',
+     'JIG-L User':                     'Jig Loading User',
+     'IP User':                        'Inprocess Inspection User',
+     'JIG-UL User':                    'Jig Unloading Zone 1 User',
+     'JIG-UL-Z2 User':                 'Jig Unloading Zone 2 User',
+     'NQ User':                        'Nickel Inspection Zone 1 User',
+     'NA User':                        'Nickel Audit Zone 1 User',
+     'Nickel Inspection Zone 2 User':  'Nickel Inspection Zone 2 User',
+     'Nickel Audit Zone 2 User':       'Nickel Audit Zone 2 User',
+     'SP-Z1 User':                     'Spider Spindle Zone 1 User',
+     'SP-Z2 User':                     'Spider Spindle Zone 2 User',
+   };
+
+   // Per-category light color palette for card chips (keyed by DB group name)
+   const UC_COLOR_MAP = {
+     'Admin':                          { bg: '#f3e8ff', border: '#c084fc', text: '#581c87' },
+     'Normal User':                    { bg: '#f1f5f9', border: '#94a3b8', text: '#1e293b' },
+     'DP User':                        { bg: '#dbeafe', border: '#93c5fd', text: '#1e40af' },
+     'IS User':                        { bg: '#ccfbf1', border: '#5eead4', text: '#134e4a' },
+     'BQC User':                       { bg: '#ffedd5', border: '#fdba74', text: '#7c2d12' },
+     'IQF User':                       { bg: '#dcfce7', border: '#86efac', text: '#14532d' },
+     'BA User':                        { bg: '#fef9c3', border: '#fde047', text: '#713f12' },
+     'JIG-L User':                     { bg: '#fce7f3', border: '#f9a8d4', text: '#831843' },
+     'JIG-UL User':                    { bg: '#e0e7ff', border: '#a5b4fc', text: '#312e81' },
+     'JIG-UL-Z2 User':                 { bg: '#ede9fe', border: '#c4b5fd', text: '#4c1d95' },
+     'IP User':                        { bg: '#cffafe', border: '#67e8f9', text: '#164e63' },
+     'NQ User':                        { bg: '#ddd6fe', border: '#a78bfa', text: '#4c1d95' },
+     'Nickel Inspection Zone 2 User':  { bg: '#bfdbfe', border: '#7dd3fc', text: '#1e3a8a' },
+     'NA User':                        { bg: '#ffe4e6', border: '#fda4af', text: '#881337' },
+     'Nickel Audit Zone 2 User':       { bg: '#fecdd3', border: '#fb7185', text: '#881337' },
+     'SP-Z1 User':                     { bg: '#fef3c7', border: '#fcd34d', text: '#78350f' },
+     'SP-Z2 User':                     { bg: '#ecfccb', border: '#bef264', text: '#365314' },
+   };
+   const UC_FALLBACK_PALETTE = [
+     { bg: '#f0fdf4', border: '#86efac', accent: '#16a34a', text: '#14532d' },
+     { bg: '#eff6ff', border: '#93c5fd', accent: '#2563eb', text: '#1e40af' },
+     { bg: '#fdf4ff', border: '#d8b4fe', accent: '#9333ea', text: '#581c87' },
+     { bg: '#fff7ed', border: '#fdba74', accent: '#ea580c', text: '#7c2d12' },
+     { bg: '#f0fdfa', border: '#5eead4', accent: '#0d9488', text: '#134e4a' },
+   ];
+
+   function applyUcCardColor(label, groupName, index) {
+     const c = UC_COLOR_MAP[groupName] || UC_FALLBACK_PALETTE[index % UC_FALLBACK_PALETTE.length];
+     label.style.setProperty('--uc-bg',     c.bg);
+     label.style.setProperty('--uc-border', c.border);
+     label.style.setProperty('--uc-text',   c.text);
+   }
+
+   // Groups always rendered in their own top section
+   const UC_SYSTEM_ROLES = new Set(['Admin', 'Normal User']);
+
+   function setUcCardChecked(card, checked) {
+     if (!card) return;
+     const cb = card.querySelector('input[type="checkbox"]');
+     if (cb) cb.checked = checked;
+     card.classList.toggle('uc-is-checked', checked);
+   }
+
+   // Sync Admin ↔ module mutual-exclusion state
+   function syncAdminModuleMutex() {
+     const grid = document.getElementById('userCategoryCheckboxGrid');
      if (!grid) return;
-     grid.innerHTML = "";
-     if (!groups || !groups.length) {
-       const empty = document.createElement("span");
-       empty.className = "uc-checkbox-empty";
-       empty.textContent = "No user categories available";
+     const allCards   = Array.from(grid.querySelectorAll('.uc-checkbox-opt'));
+     const adminCard  = allCards.find(c => c.dataset.groupName === 'Admin');
+     const modCards   = allCards.filter(c => c.dataset.groupName !== 'Admin' && c.dataset.groupName !== 'Normal User');
+     const otherCards = allCards.filter(c => c.dataset.groupName !== 'Admin');
+     const adminOn    = adminCard ? adminCard.classList.contains('uc-is-checked') : false;
+     const anyModOn   = modCards.some(c => c.classList.contains('uc-is-checked'));
+     if (adminCard) {
+       adminCard.classList.toggle('uc-admin-disabled', anyModOn && !adminOn);
+       const cb = adminCard.querySelector('input[type="checkbox"]');
+       if (cb) cb.disabled = anyModOn && !adminOn;
+     }
+     otherCards.forEach(function(card) {
+       card.classList.toggle('uc-module-disabled', adminOn);
+       const cb = card.querySelector('input[type="checkbox"]');
+       if (cb) cb.disabled = adminOn;
+     });
+   }
+
+   function buildUcCard(group, isChecked, idx) {
+     const label = document.createElement('label');
+     label.className = 'uc-checkbox-opt';
+     label.title = UC_DISPLAY_MAP[group.name] || group.name;
+     label.dataset.groupName = group.name;
+     applyUcCardColor(label, group.name, idx);
+     if (isChecked) label.classList.add('uc-is-checked');
+
+     const checkbox = document.createElement('input');
+     checkbox.type = 'checkbox';
+     checkbox.className = 'user-category-checkbox';
+     checkbox.value = String(group.id);
+     checkbox.checked = isChecked;
+
+     // Green tick — shown only when checked
+     const tick = document.createElement('span');
+     tick.className = 'uc-tick';
+     tick.textContent = '✓';
+     tick.setAttribute('aria-hidden', 'true');
+
+     const nameSpan = document.createElement('span');
+     nameSpan.className = 'uc-name';
+     nameSpan.textContent = UC_DISPLAY_MAP[group.name] || group.name;
+
+     checkbox.addEventListener('change', function () {
+       const on = this.checked;
+       label.classList.toggle('uc-is-checked', on);
+
+       if (group.name === 'Admin') {
+         // Admin is full access by itself; keep other categories unselected.
+         const grid = document.getElementById('userCategoryCheckboxGrid');
+         if (grid) {
+           grid.querySelectorAll('.uc-checkbox-opt').forEach(function(card) {
+             if (card === label) return;
+             setUcCardChecked(card, false);
+           });
+         }
+       } else if (on) {
+         const grid = document.getElementById('userCategoryCheckboxGrid');
+         const adminCard = grid ? grid.querySelector('.uc-checkbox-opt[data-group-name="Admin"]') : null;
+         setUcCardChecked(adminCard, false);
+       }
+
+       syncAdminModuleMutex();
+       const currentIds = getSelectedUserCategoryIds();
+       window.pendingUserCategoryIds = currentIds;
+       updateUserCategoryLegacyInput(currentIds);
+       refreshModulesForSelectedCategories();
+     });
+
+     label.appendChild(checkbox);
+     label.appendChild(tick);
+     label.appendChild(nameSpan);
+     return label;
+   }
+
+   function renderUserCategoryCheckboxes(groups) {
+     const grid = document.getElementById('userCategoryCheckboxGrid');
+     if (!grid) return;
+     grid.innerHTML = '';
+
+     // Hide Recovery groups
+     const visibleGroups = (groups || []).filter(g => !UC_HIDDEN_GROUPS.has(g.name));
+
+     if (!visibleGroups.length) {
+       const empty = document.createElement('span');
+       empty.className = 'uc-checkbox-empty';
+       empty.textContent = 'No user categories available';
        grid.appendChild(empty);
        updateUserCategoryLegacyInput([]);
        return;
      }
 
-     const selectedIds = window.pendingUserCategoryIds.length
+     let selectedIds = window.pendingUserCategoryIds.length
        ? normalizeIdArray(window.pendingUserCategoryIds)
        : getSelectedUserCategoryIds();
+     const adminGroup = visibleGroups.find(g => g.name === 'Admin');
+     if (adminGroup && selectedIds.includes(String(adminGroup.id))) {
+       selectedIds = [String(adminGroup.id)];
+     }
 
-     groups.forEach(group => {
-       const label = document.createElement("label");
-       label.className = "uc-checkbox-opt";
-       label.title = group.name;
-
-       const checkbox = document.createElement("input");
-       checkbox.type = "checkbox";
-       checkbox.className = "user-category-checkbox";
-       checkbox.value = String(group.id);
-       checkbox.checked = selectedIds.includes(String(group.id));
-       checkbox.addEventListener("change", function () {
-         const currentIds = getSelectedUserCategoryIds();
-         window.pendingUserCategoryIds = currentIds;
-         updateUserCategoryLegacyInput(currentIds);
-         refreshModulesForSelectedCategories();
+     // Clear button row (top-right)
+     const clearRow = document.createElement('div');
+     clearRow.style.cssText = 'width:100%;display:flex;justify-content:flex-end;margin-bottom:0.05rem;';
+     const clearBtn = document.createElement('button');
+     clearBtn.type = 'button';
+     clearBtn.className = 'uc-clear-btn';
+     clearBtn.textContent = '✕ Clear';
+     clearBtn.title = 'Clear all selected categories';
+     clearBtn.addEventListener('click', function () {
+       grid.querySelectorAll('.uc-checkbox-opt').forEach(function(card) {
+         card.classList.remove('uc-is-checked', 'uc-admin-disabled', 'uc-module-disabled');
+         const cb = card.querySelector('input[type="checkbox"]');
+         if (cb) { cb.checked = false; cb.disabled = false; }
        });
-
-       const name = document.createElement("span");
-       name.textContent = group.name;
-
-       label.appendChild(checkbox);
-       label.appendChild(name);
-       grid.appendChild(label);
+       window.pendingUserCategoryIds = [];
+       updateUserCategoryLegacyInput([]);
+       refreshModulesForSelectedCategories();
      });
+     clearRow.appendChild(clearBtn);
+     grid.appendChild(clearRow);
 
+     const systemGroups = visibleGroups.filter(g => UC_SYSTEM_ROLES.has(g.name));
+     const moduleGroups = visibleGroups.filter(g => !UC_SYSTEM_ROLES.has(g.name));
+
+     // --- System Roles row ---
+     if (systemGroups.length) {
+       const sysLabel = document.createElement('div');
+       sysLabel.className = 'uc-group-label';
+       sysLabel.textContent = 'System Roles';
+       grid.appendChild(sysLabel);
+       const sysRow = document.createElement('div');
+       sysRow.className = 'uc-group-row';
+       systemGroups.forEach(function(group, idx) {
+         sysRow.appendChild(buildUcCard(group, selectedIds.includes(String(group.id)), idx));
+       });
+       grid.appendChild(sysRow);
+     }
+
+     // --- Module Access row ---
+     if (moduleGroups.length) {
+       const modLabel = document.createElement('div');
+       modLabel.className = 'uc-group-label';
+       modLabel.textContent = 'Module Access';
+       grid.appendChild(modLabel);
+       const modRow = document.createElement('div');
+       modRow.className = 'uc-group-row';
+       moduleGroups.forEach(function(group, idx) {
+         modRow.appendChild(buildUcCard(group, selectedIds.includes(String(group.id)), idx));
+       });
+       grid.appendChild(modRow);
+     }
+
+     // Initial mutex sync (for edit flow pre-population)
+     syncAdminModuleMutex();
      updateUserCategoryLegacyInput(selectedIds);
    }
 
@@ -2331,12 +2566,6 @@ form.addEventListener("submit", async function (e) {
 
      // Delegate edit and delete button clicks for user table (CSP-safe)
      document.getElementById("usersTableBody").addEventListener("click", function (e) {
-       const submitBtn = e.target.closest(".action-btn.submit-flow");
-       if (submitBtn) {
-         completeUserFlow();
-         return;
-       }
-
        const delBtn = e.target.closest(".action-btn.delete");
        if (delBtn) {
          const tr = delBtn.closest("tr");
@@ -2481,44 +2710,21 @@ form.addEventListener("submit", async function (e) {
          }
        }
 
-       const isNew = (window.latestCreatedUser && String(user.id) === String(window.latestCreatedUser.id));
-       const isEditing = (window.editingUserId && String(user.id) === String(window.editingUserId));
-       const isActive = isNew || isEditing;
-
-       if (isEditing || isNew) {
-           console.log(`[renderUsersTable] User ${user.id} (${user.username}) isActive=${isActive}. isNew=${isNew}, isEditing=${isEditing}`);
-       }
-
-       let actionsHtml = "";
-
-       if (isActive) {
-         actionsHtml = `
-           <button class="action-btn submit-flow" title="Complete Flow" data-user-id="${user.id}">
-             <span style="font-size:1.1em; line-height:1;">&#10003;</span> <span style="margin-left:4px;">Submit</span>
-           </button>
-         `;
-       } else {
-         actionsHtml = `
+       const actionsHtml = `
           <button class="action-btn edit" title="Edit" data-user-id="${user.id}">        <svg width="18" height="18" fill="none" viewBox="0 0 20 20"><path d="M4 13.5V16h2.5l7.06-7.06-2.5-2.5L4 13.5zM17.71 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z" fill="#1d4ed8"/></svg>
           </button>
           <button class="action-btn delete" title="Delete" data-user-id="${user.id}">
             <svg width="18" height="18" fill="none" viewBox="0 0 20 20"><path d="M6 7v7a2 2 0 0 0 2 2h4a2 2 0 0 0 2-2V7M9 10v3m2-3v3M4 7h12M9 3h2a1 1 0 0 1 1 1v1H8V4a1 1 0 0 1 1-1z" stroke="#dc2626" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
           </button>
         `;
-       }
 
        const tr = document.createElement("tr");
-       if (isActive) {
-         tr.classList.add("new-user-highlight");
-       }
        tr.innerHTML = `
          <td>${serial++}</td>
          <td>${user.username || ""}</td>
          <td>${user.first_name || ""} ${user.last_name || ""}</td>
          <td>${user.email || ""}</td>
          <!-- <td>${user.user_category || user.group_name || ""}</td> -->
-         <td>${user.department || ""}</td>
-         <td>${user.role || ""}</td>
          <td>${user.manager || ""}</td>
          <td>${user.employment_status || ""}</td>
          <!-- <td>${modulesHtml}</td> -->
@@ -2994,6 +3200,9 @@ document.getElementById("btn-module-save-next").onclick = async function () {
         title: 'Modules Saved',
         text: 'Modules have been assigned to the user and group.'
       });
+      window.latestCreatedUser = null;
+      window.editingUserId = null;
+      if (typeof updateBreadcrumbAccess === "function") updateBreadcrumbAccess();
       showStep(3);
       // Refresh the user table after navigating to step 3
       fetchAndRenderUsers(1);

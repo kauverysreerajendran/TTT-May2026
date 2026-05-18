@@ -30,6 +30,15 @@ DEBUG = True
 
 ALLOWED_HOSTS = ['*']
 
+# Required for Django 4.0+ CSRF Origin validation.
+# Extend this list with production hostname/IP when deploying.
+CSRF_TRUSTED_ORIGINS = [
+    'http://127.0.0.1:8000',
+    'http://localhost:8000',
+    'http://127.0.0.1',
+    'http://localhost',
+]
+
 # Application definition
 INSTALLED_APPS = [
     'django.contrib.admin',
@@ -42,7 +51,7 @@ INSTALLED_APPS = [
     'rest_framework',
     'csp',
     
-    #ownapps
+    # ownapps
     'modelmasterapp',
     'adminportal',
     'DayPlanning',
@@ -66,33 +75,18 @@ INSTALLED_APPS = [
     'ReportsModule',
     'SpiderSpindle_Z1',
     'SpiderSpindle_Z2',
-     'social_django',
-
-           
+    'social_django',
 ]
 
 # Add custom backend (keep default ModelBackend as fallback)
 AUTHENTICATION_BACKENDS = [
     'django.contrib.auth.backends.ModelBackend',
-    #'social_core.backends.google.GoogleOAuth2', 
-    #'social_core.backends.azuread.AzureADOAuth2',
-    # optionally add social auth backends if using social_django / allauth
-    # 'social_core.backends.open_id_connect.OpenIdConnectAuth',
 ]
-
-
-# SOCIAL_AUTH_GOOGLE_OAUTH2_KEY = 'REDACTED_GOOGLE_OAUTH_KEY'
-# SOCIAL_AUTH_GOOGLE_OAUTH2_SECRET = 'REDACTED_GOOGLE_OAUTH_SECRET'
-# optional: require verified email before auto-linking
-# SOCIAL_AUTH_GOOGLE_OAUTH2_SCOPE = ['email', 'profile']
-
 
 # Ensure social login redirects to the dashboard
 SOCIAL_AUTH_LOGIN_REDIRECT_URL = '/home/'
 SOCIAL_AUTH_LOGIN_ERROR_URL = '/accounts/login/'
 SOCIAL_AUTH_LOGIN_URL = '/accounts/login/'
-
-
 
 # social-auth pipeline: include our linker function
 SOCIAL_AUTH_PIPELINE = (
@@ -100,7 +94,6 @@ SOCIAL_AUTH_PIPELINE = (
     'social_core.pipeline.social_auth.social_uid',
     'social_core.pipeline.social_auth.auth_allowed',
     'social_core.pipeline.social_auth.social_user',
-    # Try to link by email/username before creating a new user
     'watchcase_tracker.sso_pipeline.link_sso_by_email_or_username',
     'social_core.pipeline.user.get_username',
     'social_core.pipeline.user.create_user',
@@ -108,8 +101,6 @@ SOCIAL_AUTH_PIPELINE = (
     'social_core.pipeline.social_auth.load_extra_data',
     'social_core.pipeline.user.user_details',
 )
-
-
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
@@ -124,8 +115,6 @@ MIDDLEWARE = [
     'adminportal.middleware.LoginLatencyMiddleware',
     'middleware.forbidden_redirect.ForbiddenToLoginMiddleware',
     'watchcase_tracker.middleware.latency_middleware.LatencyMiddleware',
-
-
 ]
 
 LOGIN_URL = '/accounts/login/'
@@ -135,14 +124,11 @@ AUTH_LOGIN_TEMPLATE = 'login.html'
 
 ROOT_URLCONF = 'watchcase_tracker.urls'
 
-
 STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
-
 
 TEMPLATES = [
     {
         'BACKEND': 'django.template.backends.django.DjangoTemplates',
-        
         'DIRS': [os.path.join(BASE_DIR, 'static/templates')],
         'APP_DIRS': True,
         'OPTIONS': {
@@ -151,9 +137,9 @@ TEMPLATES = [
                 'django.template.context_processors.request',
                 'django.contrib.auth.context_processors.auth',
                 'django.contrib.messages.context_processors.messages',
-                'social_django.context_processors.backends',      # add
-                'social_django.context_processors.login_redirect',# add
-                'watchcase_tracker.context_processors.csp_nonce',  # Add this line
+                'social_django.context_processors.backends',
+                'social_django.context_processors.login_redirect',
+                'watchcase_tracker.context_processors.csp_nonce',
                 'adminportal.context_processors.user_permissions',
             ],
         },
@@ -169,24 +155,18 @@ REST_FRAMEWORK = {
 }
 
 # Database
-# https://docs.djangoproject.com/en/5.1/ref/settings/#databases
-
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
         'NAME': 'watchcase2026',
-        'USER':'postgres',
-        'PASSWORD':'postgres',
-        'HOST':'localhost',
-        'PORT':'5432',
+        'USER': 'postgres',
+        'PASSWORD': 'postgres',
+        'HOST': 'localhost',
+        'PORT': '5432',
     }
 }
 
-
-
 # Password validation
-# https://docs.djangoproject.com/en/5.1/ref/settings/#auth-password-validators
-
 AUTH_PASSWORD_VALIDATORS = [
     {
         'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator',
@@ -212,14 +192,12 @@ SESSION_SAVE_EVERY_REQUEST = False
 SESSION_COOKIE_HTTPONLY = True
 SESSION_COOKIE_SAMESITE = 'Lax'
 SESSION_COOKIE_AGE = 86400  # 24 hours
+
 ENABLE_MICROSOFT_LOGIN = False
 ENABLE_LOGIN_LATENCY_LOGS = False
 ENABLE_DASHBOARD_LATENCY_LOGS = False
 
-
 # Internationalization
-# https://docs.djangoproject.com/en/5.1/topics/i18n/
-
 LANGUAGE_CODE = 'en-us'
 
 TIME_ZONE = 'Asia/Kolkata'
@@ -228,110 +206,25 @@ USE_I18N = True
 
 USE_TZ = True
 
-
-# Static files (CSS, JavaScript, Images)
-# https://docs.djangoproject.com/en/5.1/howto/static-files/
-
+# Static files
 STATIC_URL = '/static/'
 STATICFILES_DIRS = [os.path.join(BASE_DIR, 'static')]
+
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 
 # Default primary key field type
-# https://docs.djangoproject.com/en/5.1/ref/settings/#default-auto-field
-
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
-
+# Minimal logging
 LOGGING = {
     'version': 1,
     'disable_existing_loggers': False,
-    'formatters': {
-        'detailed': {
-            'format': '%(asctime)s | DB: %(db_name)s | View: %(view_name)s | User: %(user)s | ACTION: %(message)s'
-        },
-        'broken_hooks': {
-            'format': '%(asctime)s | BROKEN_HOOKS | %(message)s'
-        },
-        'simple': {
-            'format': '%(asctime)s %(levelname)s %(name)s %(message)s'
-        },
-        'input_screening': {
-            'format': '%(asctime)s | %(levelname)s | %(message)s'
-        },
-    },
-    'handlers': {
-        'console': {
-            'level': 'WARNING',
-            'class': 'logging.StreamHandler',
-            'formatter': 'simple',
-        },
-        'jig_pick_table_file': {
-            'level': 'DEBUG',
-            'class': 'logging.FileHandler',
-            #'filename': 'JL_PickTable.log',
-            'filename': r'A:\Workspace\Watchcase Tracker Titan\Jig_Loading\JL_PickTable.log',
-            'formatter': 'detailed',
-        },
-        'broken_hooks_file': {
-            'level': 'DEBUG',
-            'class': 'logging.FileHandler',
-            'filename': r'A:\Workspace\Watchcase Tracker Titan\broken_hooks_detailed.log',
-            'formatter': 'broken_hooks',
-        },
-        'latency_file': {
-            'level': 'WARNING',
-            'class': 'logging.FileHandler',
-            'filename': 'latency.log',
-            'formatter': 'simple',
-        },
-        'input_screening_file': {
-            'level': 'DEBUG',
-            'class': 'logging.FileHandler',
-            'filename': os.path.join(BASE_DIR, 'input_screening_debug.log'),
-            'formatter': 'input_screening',
-        },
-    },
-    'loggers': {
-        'jig_pick_table': {
-            'handlers': ['jig_pick_table_file'],
-            'level': 'DEBUG',
-            'propagate': False,
-        },
-        'broken_hooks': {
-            'handlers': ['broken_hooks_file'],
-            'level': 'DEBUG',
-            'propagate': False,
-        },
-        'watchcase_tracker.middleware.latency_middleware': {
-            'handlers': ['latency_file'],
-            'level': 'INFO',
-            'propagate': False,
-        },
-        'adminportal': {
-            'handlers': ['latency_file', 'console'],
-            'level': 'WARNING',
-            'propagate': False,
-        },
-        'modelmasterapp': {
-            'handlers': ['latency_file', 'console'],
-            'level': 'WARNING',
-            'propagate': False,
-        },
-        'input_screening': {
-            'handlers': ['input_screening_file'],
-            'level': 'DEBUG',
-            'propagate': False,
-        },
-    },
 }
 
 # Microsoft (Entra ID) / MSAL settings
-# IMPORTANT: Use the actual secret VALUE from Azure (Certificates & secrets), not the secret ID.
-# These are hard-coded here per your request — replace the CLIENT_SECRET value with your real secret.
 MSAL_CLIENT_ID = "54a2fd19-0009-4e29-9d7b-b33e9ae8fbfa"
-MSAL_CLIENT_SECRET = os.getenv("MSAL_CLIENT_SECRET")    # We use the common authority (no tenant-specific resolution)
+MSAL_CLIENT_SECRET = os.getenv("MSAL_CLIENT_SECRET")
 MSAL_TENANT_ID = "common"
 MSAL_REDIRECT_PATH = "/auth/microsoft/callback/"
 MSAL_SCOPES = ["User.Read"]
-

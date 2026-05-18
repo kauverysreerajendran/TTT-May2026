@@ -176,7 +176,7 @@
          overflow-x: hidden !important;
          height: calc(100vh - 92px) !important; /* 60px header + 32px footer */
          max-height: calc(100vh - 92px) !important;
-         padding-bottom: 20px !important; /* extra space so last expanded submenu (Spider Spindle) is fully scrollable into view */
+         padding-bottom: 4px !important;
          box-sizing: border-box !important;
          z-index: 100 !important;
          position: relative;
@@ -185,14 +185,14 @@
          margin-bottom: 0 !important;
          scrollbar-width: thin;
          }
-         /* Ensure the last nav item (Spider Spindle) and its expanded submenu can never be clipped */
+         /* Sidebar nav: minimal bottom clearance only */
          .sidebar > .nav,
          .sidebar .nav.flex-column {
-         padding-bottom: 80px !important;
+         padding-bottom: 8px !important;
          }
          .sidebar .nav-item:last-child .collapse.show,
          .sidebar .nav-item:last-child .sub-menu {
-         margin-bottom: 40px !important;
+         margin-bottom: 0 !important;
          }
          /* Visible custom scrollbar so users know the sidebar is scrollable */
          .sidebar::-webkit-scrollbar { width: 6px; }
@@ -458,6 +458,135 @@
          justify-content: center;
          align-items: center;
          }
+
+          :root {
+          --ttt-sidebar-expanded-width: 250px;
+          --ttt-sidebar-tablet-width: 280px;
+          --ttt-sidebar-collapsed-width: 70px;
+          --ttt-sidebar-tablet-collapsed-width: 65px;
+          --ttt-footer-height: 32px;
+          }
+
+          .sidebar {
+          height: calc(100vh - 60px) !important;
+          max-height: calc(100vh - 60px) !important;
+          padding-bottom: 12px !important;
+          overflow-y: auto !important;
+          overflow-x: hidden !important;
+          z-index: 120 !important;
+          }
+
+          .sidebar > .nav {
+          padding-bottom: 14px !important;
+          }
+
+          .sidebar .nav.sub-menu,
+          .sidebar .nav.flex-column.sub-menu {
+          padding-bottom: 0 !important;
+          margin-bottom: 0 !important;
+          }
+
+          .sidebar .nav .nav-item .nav-link {
+          height: auto !important;
+          min-height: 34px !important;
+          align-items: flex-start !important;
+          overflow: visible !important;
+          white-space: normal !important;
+          }
+
+          .sidebar .nav .nav-item .nav-link .menu-title {
+          display: inline-block !important;
+          white-space: normal !important;
+          overflow: visible !important;
+          text-overflow: clip !important;
+          word-break: normal !important;
+          overflow-wrap: anywhere !important;
+          line-height: 1.2 !important;
+          }
+
+          body.sidebar-icon-only .sidebar .nav:not(.sub-menu) {
+          margin-left: 0 !important;
+          margin-right: 0 !important;
+          }
+
+          body.sidebar-icon-only .sidebar .nav .nav-item .nav-link {
+          justify-content: center !important;
+          align-items: center !important;
+          padding-left: 0 !important;
+          padding-right: 0 !important;
+          overflow: hidden !important;
+          }
+
+          body.sidebar-icon-only .sidebar .nav .nav-item .nav-link .menu-title,
+          body.sidebar-icon-only .sidebar .nav .nav-item .menu-title,
+          body.sidebar-icon-only .sidebar .nav .nav-item .nav-link .menu-arrow,
+          body.sidebar-icon-only .sidebar .nav .nav-item .collapse,
+          body.sidebar-icon-only .sidebar .nav .nav-item .collapsing,
+          body.sidebar-icon-only .sidebar .nav .nav-item .sub-menu {
+          display: none !important;
+          visibility: hidden !important;
+          width: 0 !important;
+          min-width: 0 !important;
+          max-width: 0 !important;
+          height: 0 !important;
+          min-height: 0 !important;
+          max-height: 0 !important;
+          margin: 0 !important;
+          padding: 0 !important;
+          overflow: hidden !important;
+          pointer-events: none !important;
+          }
+
+          body.sidebar-icon-only .sidebar .nav .nav-item .menu-icon,
+          body.sidebar-icon-only .sidebar .nav .nav-item img.menu-icon,
+          body.sidebar-icon-only .sidebar .nav .nav-item i,
+          body.sidebar-icon-only .sidebar .nav .nav-item .fa,
+          body.sidebar-icon-only .sidebar .nav .nav-item .ti {
+          margin-left: 0 !important;
+          margin-right: 0 !important;
+          width: 24px !important;
+          min-width: 24px !important;
+          max-width: 24px !important;
+          display: inline-flex !important;
+          align-items: center !important;
+          justify-content: center !important;
+          }
+
+          footer.footer {
+          position: static !important;
+          left: auto !important;
+          bottom: auto !important;
+          width: 100% !important;
+          max-width: 100% !important;
+          height: var(--ttt-footer-height) !important;
+          flex: 0 0 auto !important;
+          z-index: 1 !important;
+          }
+
+          body.sidebar-icon-only footer.footer {
+          left: auto !important;
+          width: 100% !important;
+          }
+
+          @media (pointer: coarse) and (min-width: 680px) and (max-width: 1400px),
+            (min-width: 760px) and (max-width: 1024px) {
+          footer.footer {
+          left: auto !important;
+          width: 100% !important;
+          }
+
+          body.sidebar-icon-only footer.footer {
+          left: auto !important;
+          width: 100% !important;
+          }
+          }
+
+          @media (max-width: 679.98px) {
+          footer.footer {
+          left: 0 !important;
+          width: 100% !important;
+          }
+          }
          .barcode-icon {
          height: 36px;
          width: 36px;
@@ -1834,21 +1963,21 @@
          </div>
       </li>
       {% endif %}
-      {% if is_admin or 'JUL Main Table Zone II' in allowed_modules or 'JUL Completed Zone II' in allowed_modules %}
+      {% if is_admin or 'JUL Main Table Zone 2' in allowed_modules or 'JUL Completed Zone 2' in allowed_modules %}
       <li class="nav-item">
          <a class="nav-link" data-bs-toggle="collapse" href="#jig-unloading-zone2" aria-expanded="false" aria-controls="jig-unloading-zone2">
-         <img src="{% static 'assets/icons/29.png' %}" class="menu-icon" alt="Jig Unloading Zone II" />
-         <span class="menu-title">Jig Unloading Zone II</span>
+        <img src="{% static 'assets/icons/29.png' %}" class="menu-icon" alt="Jig Unloading Zone 2" />
+        <span class="menu-title">Jig Unloading Zone 2</span>
          <i class="menu-arrow"></i>
          </a>
          <div class="collapse" id="jig-unloading-zone2">
             <ul class="nav flex-column sub-menu">
-               {% if is_admin or 'JUL Main Table Zone II' in allowed_modules %}
+               {% if is_admin or 'JUL Main Table Zone 2' in allowed_modules %}
                <li class="nav-item">
                   <a class="nav-link" href="{% url 'JU_Zone_MainTable' %}">JUL Main Table</a>
                </li>
                {% endif %}
-               {% if is_admin or 'JUL Completed Zone II' in allowed_modules %}
+               {% if is_admin or 'JUL Completed Zone 2' in allowed_modules %}
                <li class="nav-item">
                   <a class="nav-link" href="{% url 'JU_Zone_Completedtable' %}">JUL Completed</a>
                </li>
@@ -1879,6 +2008,8 @@
             </ul>
          </div>
       </li>
+      {% endif %}
+      {% if is_admin or 'Nickel Inspection Zone 2 Pick Table' in allowed_modules or 'Nickel Inspection Zone 2 Completed Table' in allowed_modules or 'Nickel Inspection Zone 2 Reject Table' in allowed_modules %}
       <li class="nav-item">
          <a class="nav-link" data-bs-toggle="collapse" href="#nickel-inspection-zone2" aria-expanded="false" aria-controls="nickel-inspection-zone2">
          <img src="{% static 'assets/icons/39.png' %}" class="menu-icon" alt="Nickel Wiping Zone2" />
@@ -1919,6 +2050,8 @@
             </ul>
          </div>
       </li>
+      {% endif %}
+      {% if is_admin or 'Nickel Audit Zone 2 Pick Table' in allowed_modules or 'Nickel Audit Zone 2 Completed Table' in allowed_modules %}
       <li class="nav-item">
          <a class="nav-link" data-bs-toggle="collapse" href="#nickelAuditMenuZone2" aria-expanded="false" aria-controls="nickelAuditMenuZone2">
          <img src="{% static 'assets/icons/40.png' %}" class="menu-icon" alt="Nickel Audit Zone2" />
@@ -1992,6 +2125,11 @@
       <div class="main-panel" style="margin-top: 13px !important;">
          {% block page_title %}{% endblock %}
          {% block content %}{% endblock %}
+        <footer class="footer">
+          <span>
+          &copy; 2026 Pinesphere. All rights reserved.
+          </span>
+        </footer>
          <!-- page-body-wrapper ends -->
       </div>
       <!-- container-scroller -->
@@ -2163,11 +2301,6 @@
             </div>
          </div>
       </div>
-      <footer class="footer">
-         <span>
-         &copy; 2026 Pinesphere. All rights reserved.
-         </span>
-      </footer>
       <!-- Script for Tray Identification Form -->
       <script nonce="{{ csp_nonce }}">
          // Tablet image zoom toggle

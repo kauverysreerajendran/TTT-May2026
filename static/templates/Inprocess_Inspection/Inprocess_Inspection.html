@@ -1476,7 +1476,7 @@
                               background-color: #ccc; color: #888;
                               {% endif %}
                               font-weight: 500; line-height: 20px; text-align: center; padding-top: 1px; padding-right: 1px;">
-                              <span class="bath-type-letter">{% if jig_detail.ep_bath_type == 'Dull' %}D{% elif jig_detail.ep_bath_type == 'Semi Bright' %}S{% else %}B{% endif %}</span>
+                              <span class="bath-type-letter" style="color: {% if jig_detail.bath_numbers %}white{% else %}#888{% endif %};">{% if jig_detail.ep_bath_type == 'Dull' %}D{% elif jig_detail.ep_bath_type == 'Semi Bright' %}S{% else %}B{% endif %}</span>
                            </div>
                            <!-- Rework (R) - Always disabled for now -->
                            <div title="Inspection"
@@ -2517,6 +2517,8 @@
              if (trayScanStatus) {
                trayScanStatus.style.backgroundColor = '#0c8249';
                trayScanStatus.style.color = 'white';
+               const bls = trayScanStatus.querySelector('.bath-type-letter');
+               if (bls) bls.style.color = 'white';
              }
 
              // Enable the "Inspection" hyperlink in this row if present
@@ -2698,6 +2700,8 @@
      document.querySelectorAll('.mm-gallery-trigger').forEach(function(trigger) {
        trigger.addEventListener('click', function(e) {
          e.stopPropagation();
+         var row = trigger.closest('tr');
+         if (row && window.highlightAndMoveRow) window.highlightAndMoveRow(row);
          var cell = trigger.closest('.model-stock-no-cell');
          if (cell) openGallery(cell);
        });
@@ -2705,11 +2709,13 @@
 
      closeBtn.addEventListener('click', function() {
        modal.style.display = 'none';
+       if (window.restoreRowAndClearHighlight) window.restoreRowAndClearHighlight();
      });
 
      window.addEventListener('click', function(e) {
        if (modal.style.display === 'block' && !modal.contains(e.target) && !e.target.closest('.mm-gallery-trigger')) {
          modal.style.display = 'none';
+         if (window.restoreRowAndClearHighlight) window.restoreRowAndClearHighlight();
        }
      });
    });
@@ -3363,11 +3369,13 @@ document.addEventListener("DOMContentLoaded", function () {
    
      closeBtn.addEventListener('click', function() {
        modal.style.display = 'none';
+       if (window.restoreRowAndClearHighlight) window.restoreRowAndClearHighlight();
      });
      
      window.addEventListener('click', function(e) {
        if (modal.style.display === 'block' && !modal.contains(e.target) && !e.target.classList.contains('expand-model-remark')) {
          modal.style.display = 'none';
+         if (window.restoreRowAndClearHighlight) window.restoreRowAndClearHighlight();
        }
      });
    });
@@ -3663,10 +3671,22 @@ document.addEventListener("DOMContentLoaded", function () {
        }
      }
    
-     // Attach to all close buttons for tray scan/modal
-     document.querySelectorAll('#closeTrayScanModal, #closeTrayScanModal_DayPlanning, .close, [data-bs-dismiss="modal"]').forEach(function(btn) {
+     // Attach to all close buttons for tray scan/modal (including model gallery)
+     document.querySelectorAll('#closeTrayScanModal, #closeTrayScanModal_DayPlanning, #closeModelRemarkModal, .close, [data-bs-dismiss="modal"]').forEach(function(btn) {
        btn.addEventListener('click', restoreRowAndClearHighlight);
      });
+
+     // Bath number dropdown change → highlight and move row to top
+     document.addEventListener('change', function(e) {
+       if (e.target.classList.contains('bath-number-select')) {
+         var row = e.target.closest('tr');
+         if (row) highlightAndMoveRow(row);
+       }
+     });
+
+     // Expose for use across scripts
+     window.highlightAndMoveRow = highlightAndMoveRow;
+     window.restoreRowAndClearHighlight = restoreRowAndClearHighlight;
    });
 </script>
 <!-- Enhanced Script for Bath Number Selection with Type Filtering -->
@@ -3776,7 +3796,13 @@ document.addEventListener("DOMContentLoaded", function () {
                     if (trayScanStatus) {
                         trayScanStatus.style.backgroundColor = '#0c8249';
                         trayScanStatus.style.color = 'white';
-                        trayScanStatus.textContent = `${selectedBathType}`;
+                        // Update only the letter span with the abbreviation (B/D/S), not the full bath type
+                        const letterSpan = trayScanStatus.querySelector('.bath-type-letter');
+                        if (letterSpan) {
+                            const bathLetter = getBathTypeLetterAndTitle(selectedBathType).letter;
+                            letterSpan.textContent = bathLetter;
+                            letterSpan.style.color = 'white';
+                        }
                     }
                     
                     // Update the Action column to show active Inspection link
@@ -4170,19 +4196,19 @@ document.addEventListener('DOMContentLoaded', function() {
 
 <!-- ✅ Fix 3: Update Bath Type Circle Letter (B/D/S) when Bath Number is Selected -->
 <script nonce="{{ csp_nonce }}">
-document.addEventListener('DOMContentLoaded', function() {
-  // Mapping function: Convert bath type to letter
-  function getBathTypeLetterAndTitle(bathType) {
-    bathType = (bathType || '').trim();
-    if (bathType === 'Dull') {
-      return { letter: 'D', title: 'Dull' };
-    } else if (bathType === 'Semi Bright') {
-      return { letter: 'S', title: 'Semi Bright' };
-    } else {
-      return { letter: 'B', title: 'Bright' };
-    }
+// Global: Convert bath type to letter — accessible to all scripts on this page
+function getBathTypeLetterAndTitle(bathType) {
+  bathType = (bathType || '').trim();
+  if (bathType === 'Dull') {
+    return { letter: 'D', title: 'Dull' };
+  } else if (bathType === 'Semi Bright') {
+    return { letter: 'S', title: 'Semi Bright' };
+  } else {
+    return { letter: 'B', title: 'Bright' };
   }
+}
 
+document.addEventListener('DOMContentLoaded', function() {
   // Handle bath number dropdown changes
   document.addEventListener('change', function(e) {
     if (!e.target.classList.contains('bath-number-select')) return;
@@ -4206,6 +4232,10 @@ document.addEventListener('DOMContentLoaded', function() {
     const letterSpan = circle.querySelector('.bath-type-letter');
     if (letterSpan) {
       letterSpan.textContent = mapping.letter;
+      // If circle is already green, keep letter explicitly white
+      if (circle.style.backgroundColor === 'rgb(12, 130, 73)') {
+        letterSpan.style.color = 'white';
+      }
     } else {
       circle.textContent = mapping.letter;
     }

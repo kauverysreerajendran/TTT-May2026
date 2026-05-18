@@ -5,8 +5,229 @@ exist in the current stage (NickelQcTrayId, JigUnload_TrayId, etc.).
 Used by: Nickel Inspection (Z1/Z2), Nickel Audit (Z1/Z2) PickTrayIdList views.
 """
 import logging
+import re
+
+from django.db.models import Q
 
 logger = logging.getLogger(__name__)
+
+
+TRAY_ID_FORMAT_PATTERN = re.compile(r'^[A-Z]+-A\d{5}$')
+
+
+def normalize_jig_unload_tray_id(raw_tray_id):
+    return str(raw_tray_id or '').strip().upper()
+
+
+def is_valid_jig_unload_tray_id_format(raw_tray_id):
+    return bool(TRAY_ID_FORMAT_PATTERN.match(normalize_jig_unload_tray_id(raw_tray_id)))
+
+
+def _tray_id_variants(raw_tray_id):
+    tray_id = normalize_jig_unload_tray_id(raw_tray_id)
+    if not tray_id:
+        return set()
+
+    variants = {tray_id}
+    match = re.match(r'^([A-Z]+)-A(\d+)$', tray_id)
+    if match:
+        prefix, digits = match.groups()
+        if len(digits) <= 5:
+            variants.add(f'{prefix}-A{digits.zfill(5)}')
+    return variants
+
+
+def _lot_id_aliases(raw_lot_id):
+    value = str(raw_lot_id or '').strip()
+    if not value:
+        return set()
+
+    aliases = {value}
+    if ':' in value:
+        aliases.add(value.rsplit(':', 1)[-1].strip())
+    if value.startswith('JLOT-') and '-' in value[5:]:
+        aliases.add(value.rsplit('-', 1)[-1].strip())
+    return {alias for alias in aliases if alias}
+
+
+def _allowed_lot_aliases(allowed_lot_ids):
+    aliases = set()
+    for lot_id in allowed_lot_ids or []:
+        aliases.update(_lot_id_aliases(lot_id))
+    return aliases
+
+
+def _iter_payload_dicts(payload):
+    if isinstance(payload, dict):
+        yield payload
+        for value in payload.values():
+            if isinstance(value, (dict, list)):
+                yield from _iter_payload_dicts(value)
+    elif isinstance(payload, list):
+        for item in payload:
+            if isinstance(item, (dict, list)):
+                yield from _iter_payload_dicts(item)
+
+
+def _payload_contains_tray_id(payload, tray_variants):
+    for entry in _iter_payload_dicts(payload):
+        entry_tray_id = entry.get('tray_id') or entry.get('trayId')
+        if not entry_tray_id:
+            continue
+        entry_tray_id = normalize_jig_unload_tray_id(entry_tray_id)
+        if not is_valid_jig_unload_tray_id_format(entry_tray_id):
+            continue
+        if _tray_id_variants(entry_tray_id) & tray_variants:
+            return True
+    return False
+
+
+def _collect_lot_aliases_from_payload(payload):
+    aliases = set()
+    scalar_keys = ('lot_id', 'main_lot_id', 'source_lot_id', 'primary_lot_id')
+    list_keys = ('combined_lot_ids', 'source_lot_ids')
+
+    for entry in _iter_payload_dicts(payload):
+        for key in scalar_keys:
+            aliases.update(_lot_id_aliases(entry.get(key)))
+        for key in list_keys:
+            value = entry.get(key)
+            if isinstance(value, list):
+                for lot_id in value:
+                    aliases.update(_lot_id_aliases(lot_id))
+    return aliases
+
+
+def _variant_query(field_name, tray_variants):
+    query = Q()
+    for tray_id in tray_variants:
+        query |= Q(**{f'{field_name}__iexact': tray_id})
+    return query
+
+
+def _make_tray_conflict(tray_id, source, linked_lot='', record_id=None):
+    linked_lot_text = linked_lot or 'another lot'
+    return {
+        'occupied': True,
+        'tray_id': tray_id,
+        'source': source,
+        'linked_lot': linked_lot,
+        'record_id': record_id,
+        'message': (
+            f'Tray "{tray_id}" is already reserved for {linked_lot_text} in {source}. '
+            'Please use a free tray or release/delink the existing tray first.'
+        ),
+    }
+
+
+def _has_allowed_lot(record_lot_aliases, allowed_aliases):
+    return bool(record_lot_aliases and allowed_aliases and record_lot_aliases & allowed_aliases)
+
+
+def find_jig_unload_tray_conflict(raw_tray_id, allowed_lot_ids=None, include_tray_master=False):
+    """Return a conflict dict when a tray is reserved by another active lot.
+
+    Jig Unloading keeps in-progress tray scans in JSON-backed draft/autosave
+    records before final submit. Those records must reserve tray IDs just like
+    final tray rows, otherwise the same physical tray can be scanned into a
+    second lot while the first lot is still pending submission.
+    """
+    tray_id = normalize_jig_unload_tray_id(raw_tray_id)
+    tray_variants = _tray_id_variants(tray_id)
+    if not tray_variants:
+        return None
+
+    allowed_aliases = _allowed_lot_aliases(allowed_lot_ids)
+
+    from modelmasterapp.models import TrayId
+    from Jig_Unloading.models import JigUnload_TrayId, JigUnloadDraft, JigUnloadAutoSave, JUSubmittedZ1
+
+    if include_tray_master:
+        for tray in TrayId.objects.filter(_variant_query('tray_id', tray_variants)).only(
+            'id', 'tray_id', 'lot_id', 'scanned', 'delink_tray'
+        ):
+            if tray.delink_tray:
+                continue
+            record_lots = _lot_id_aliases(tray.lot_id)
+            if _has_allowed_lot(record_lots, allowed_aliases):
+                continue
+            if tray.scanned or record_lots:
+                return _make_tray_conflict(
+                    tray_id,
+                    'Tray master',
+                    next(iter(record_lots), ''),
+                    tray.id,
+                )
+
+    for tray in JigUnload_TrayId.objects.filter(_variant_query('tray_id', tray_variants)).only(
+        'id', 'tray_id', 'lot_id', 'delink_tray'
+    ):
+        if tray.delink_tray:
+            continue
+        record_lots = _lot_id_aliases(tray.lot_id)
+        if _has_allowed_lot(record_lots, allowed_aliases):
+            continue
+        return _make_tray_conflict(
+            tray_id,
+            'Jig Unloading submitted trays',
+            next(iter(record_lots), ''),
+            tray.id,
+        )
+
+    submitted_rows = JUSubmittedZ1.objects.exclude(tray_data__isnull=True).only(
+        'id', 'jig_completed_id', 'lot_id', 'tray_data', 'is_draft'
+    )
+    for submitted in submitted_rows.iterator():
+        if not _payload_contains_tray_id(submitted.tray_data, tray_variants):
+            continue
+        record_lots = _lot_id_aliases(submitted.lot_id)
+        record_lots.update(_collect_lot_aliases_from_payload(submitted.tray_data))
+        if _has_allowed_lot(record_lots, allowed_aliases):
+            continue
+        source = 'Jig Unloading draft/model save' if submitted.is_draft else 'Jig Unloading model save'
+        return _make_tray_conflict(tray_id, source, next(iter(record_lots), ''), submitted.id)
+
+    draft_rows = JigUnloadDraft.objects.exclude(draft_data__isnull=True).only(
+        'draft_id', 'main_lot_id', 'combined_lot_ids', 'draft_data'
+    )
+    for draft in draft_rows.iterator():
+        if not _payload_contains_tray_id(draft.draft_data, tray_variants):
+            continue
+        record_lots = _lot_id_aliases(draft.main_lot_id)
+        for combined_lot_id in draft.combined_lot_ids or []:
+            record_lots.update(_lot_id_aliases(combined_lot_id))
+        record_lots.update(_collect_lot_aliases_from_payload(draft.draft_data))
+        if _has_allowed_lot(record_lots, allowed_aliases):
+            continue
+        return _make_tray_conflict(
+            tray_id,
+            'Jig Unloading draft',
+            next(iter(record_lots), ''),
+            draft.draft_id,
+        )
+
+    autosave_rows = JigUnloadAutoSave.objects.exclude(tray_data__isnull=True).only(
+        'id', 'main_lot_id', 'combined_lot_ids', 'tray_data', 'updated_at'
+    )
+    for autosave in autosave_rows.iterator():
+        if autosave.is_expired() or not autosave.has_meaningful_data():
+            continue
+        if not _payload_contains_tray_id(autosave.tray_data, tray_variants):
+            continue
+        record_lots = _lot_id_aliases(autosave.main_lot_id)
+        for combined_lot_id in autosave.combined_lot_ids or []:
+            record_lots.update(_lot_id_aliases(combined_lot_id))
+        record_lots.update(_collect_lot_aliases_from_payload(autosave.tray_data))
+        if _has_allowed_lot(record_lots, allowed_aliases):
+            continue
+        return _make_tray_conflict(
+            tray_id,
+            'Jig Unloading autosave',
+            next(iter(record_lots), ''),
+            autosave.id,
+        )
+
+    return None
 
 
 def get_model_master_tray_info(plating_stk_no, fallback_type='', fallback_cap=0):

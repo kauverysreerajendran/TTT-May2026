@@ -23,6 +23,11 @@ from rest_framework import status
 from django.views.decorators.http import require_GET
 from Jig_Loading.models import *
 from Jig_Unloading.models import *
+from Jig_Unloading.tray_utils import (
+    find_jig_unload_tray_conflict,
+    is_valid_jig_unload_tray_id_format,
+    normalize_jig_unload_tray_id,
+)
 from Recovery_DP.models import *
 from Inprocess_Inspection.models import InprocessInspectionTrayCapacity
 from django.contrib.auth.mixins import LoginRequiredMixin
@@ -680,7 +685,14 @@ class JU_Zone_MainTable(LoginRequiredMixin, TemplateView):
         jig_detail.ep_bath_type = draft_data.get('nickel_bath_type', 'Bright')  # For Bath Type column
         
         # FIXED: Extract actual Bath No from ForeignKey since it's not always in draft_data
-        jig_detail.bath_number = getattr(jig_detail.bath_numbers, 'bath_number', None) or draft_data.get('bath_number', 'N/A')
+        jig_detail.bath_number = (
+            getattr(jig_detail.bath_numbers, 'bath_number', None)
+            or draft_data.get('bath_number')
+            or draft_data.get('nickel_bath_type')
+            or draft_data.get('nickel_bath_number')
+            or draft_data.get('bath_no')
+            or 'N/A'
+        )
         
         # Get tray info from draft_data first, fallback to model_cases_data if not available
         jig_detail.tray_type = draft_data.get('tray_type', None)
@@ -917,6 +929,33 @@ class JU_Zone_MainTable(LoginRequiredMixin, TemplateView):
                 if color in allowed_colors_list:
                     valid_lot_ids_for_zone2.add(lot_id)
                     print(f"✅ Zone 2 - Lot {lot_id} has valid color {color} from Recovery")
+
+            batch_ids_to_check = []
+            jig_lot_to_batch = {}
+            for jig in jigs_without_plating_in_draft:
+                if jig.lot_id not in valid_lot_ids_for_zone2:
+                    batch_id_str = (jig.draft_data or {}).get('batch_id') or getattr(jig, 'batch_id', None)
+                    if batch_id_str:
+                        batch_ids_to_check.append(batch_id_str)
+                        jig_lot_to_batch[jig.lot_id] = batch_id_str
+
+            if batch_ids_to_check:
+                zone2_batch_ids = set(
+                    TotalStockModel.objects.filter(
+                        batch_id__batch_id__in=batch_ids_to_check,
+                        plating_color__plating_color__in=allowed_colors_list
+                    ).values_list('batch_id__batch_id', flat=True)
+                )
+                zone2_batch_ids.update(
+                    ModelMasterCreation.objects.filter(
+                        batch_id__in=batch_ids_to_check,
+                        plating_color__in=allowed_colors_list
+                    ).values_list('batch_id', flat=True)
+                )
+                for jig_lot_id, batch_id_str in jig_lot_to_batch.items():
+                    if batch_id_str in zone2_batch_ids:
+                        valid_lot_ids_for_zone2.add(jig_lot_id)
+                        print(f"✅ Zone 2 JigCompleted fallback: {jig_lot_id} -> {batch_id_str}")
             
             # Get additional jigs that match by lot_id even if draft_data lacks plating_color
             additional_jigs = jigs_without_plating_in_draft.filter(lot_id__in=valid_lot_ids_for_zone2)
@@ -1913,9 +1952,21 @@ def JU_Zone_get_model_details(request):
                 elif total_stock_model and total_stock_model.plating_color:
                     plating_color_name = total_stock_model.plating_color.plating_color
                 else:
-                    jig_detail = JigCompleted.objects.filter(lot_id=lot).first()
+                    # Try JigCompleted by direct lot_id OR by lot_id_quantities key (for JLOT sub-lots)
+                    jig_detail = (
+                        JigCompleted.objects.filter(lot_id=lot).first()
+                        or JigCompleted.objects.filter(
+                            draft_data__lot_id_quantities__has_key=lot
+                        ).first()
+                    )
                     if jig_detail and jig_detail.draft_data.get('plating_color'):
                         plating_color_name = jig_detail.draft_data.get('plating_color')
+                    elif jig_detail and jig_detail.batch_id:
+                        _mmc_jc = ModelMasterCreation.objects.filter(
+                            batch_id=jig_detail.batch_id
+                        ).values('plating_color').first()
+                        if _mmc_jc and _mmc_jc.get('plating_color'):
+                            plating_color_name = _mmc_jc['plating_color']
 
             tray_id_color = '#dc3545' if plating_color_name == 'IPS' else '#006400'
             tray_id_prefix = 'NR' if tray_type == 'Normal' else 'JD'
@@ -2406,6 +2457,42 @@ def JU_Zone_save_jig_unload_tray_ids(request):
 
         if not trays:
             return JsonResponse({'success': False, 'error': 'Trays data is missing.'})
+
+        allowed_lot_ids_for_trays = [main_lot_id, jig_lot_id] + list(combined_lot_ids or [])
+        allowed_lot_ids_for_trays.extend(
+            tray.get('lot_id') for tray in trays if tray.get('lot_id')
+        )
+        seen_tray_ids = set()
+        for i, tray in enumerate(trays):
+            tray_id = normalize_jig_unload_tray_id(tray.get('tray_id', ''))
+            if not tray_id:
+                return JsonResponse({'success': False, 'error': f'Missing tray ID for tray {i}'}, status=400)
+            tray['tray_id'] = tray_id
+            if not is_valid_jig_unload_tray_id_format(tray_id):
+                return JsonResponse({
+                    'success': False,
+                    'error': f'Tray ID "{tray_id}" has invalid format. Expected format: XX-A00001'
+                }, status=400)
+            if tray_id in seen_tray_ids:
+                return JsonResponse({
+                    'success': False,
+                    'error': f'Duplicate tray ID "{tray_id}". Each tray must be unique.'
+                }, status=400)
+            seen_tray_ids.add(tray_id)
+            tray_conflict = find_jig_unload_tray_conflict(
+                tray_id,
+                allowed_lot_ids=allowed_lot_ids_for_trays,
+                include_tray_master=True,
+            )
+            if tray_conflict:
+                return JsonResponse({
+                    'success': False,
+                    'error': tray_conflict['message'],
+                    'validation_type': 'tray_occupied',
+                    'linked_lot': tray_conflict.get('linked_lot', ''),
+                    'source': tray_conflict.get('source', ''),
+                    'tray_index': i,
+                }, status=400)
 
         # Collect tray data
         all_lot_ids_from_trays = set()
@@ -3158,6 +3245,41 @@ def JU_Zone_save_jig_unload_draft(request):
                 'success': False, 
                 'error': 'Missing required data: main_lot_id, model_number, or trays'
             })
+
+        allowed_lot_ids_for_trays = [main_lot_id] + list(combined_lot_ids or [])
+        allowed_lot_ids_for_trays.extend(
+            tray.get('lot_id') for tray in trays if tray.get('lot_id')
+        )
+        seen_tray_ids = set()
+        for i, tray in enumerate(trays):
+            tray_id = normalize_jig_unload_tray_id(tray.get('tray_id', ''))
+            if not tray_id:
+                continue
+            tray['tray_id'] = tray_id
+            if not is_valid_jig_unload_tray_id_format(tray_id):
+                return JsonResponse({
+                    'success': False,
+                    'error': f'Tray ID "{tray_id}" has invalid format. Expected format: XX-A00001'
+                }, status=400)
+            if tray_id in seen_tray_ids:
+                return JsonResponse({
+                    'success': False,
+                    'error': f'Duplicate tray ID "{tray_id}" in draft. Each tray must be unique.'
+                }, status=400)
+            seen_tray_ids.add(tray_id)
+            tray_conflict = find_jig_unload_tray_conflict(
+                tray_id,
+                allowed_lot_ids=allowed_lot_ids_for_trays,
+            )
+            if tray_conflict:
+                return JsonResponse({
+                    'success': False,
+                    'error': tray_conflict['message'],
+                    'validation_type': 'tray_occupied',
+                    'linked_lot': tray_conflict.get('linked_lot', ''),
+                    'source': tray_conflict.get('source', ''),
+                    'tray_index': i,
+                }, status=400)
         
         # Prepare draft data JSON
         draft_data = {
@@ -3258,7 +3380,14 @@ def get_plating_stock_for_lot(lot_id):
         jc = JigCompleted.objects.filter(lot_id=lot_id).first()
         if jc and hasattr(jc, 'draft_data') and jc.draft_data:
             draft_data = jc.draft_data or {}
-            return draft_data.get('plating_stock_no', None)
+            plating_stock = draft_data.get('plating_stock_no') or draft_data.get('plating_stock_num')
+            if plating_stock:
+                return plating_stock
+            batch_id = draft_data.get('batch_id') or getattr(jc, 'batch_id', None)
+            if batch_id:
+                mmc = ModelMasterCreation.objects.filter(batch_id=batch_id).first()
+                if mmc and mmc.plating_stk_no:
+                    return mmc.plating_stk_no
         
         return None
     except Exception as e:
@@ -3307,13 +3436,33 @@ def validate_tray_code_by_master_data(tray_id, lot_id):
 def JU_Zone_validate_tray_id(request):
     import json
     data = json.loads(request.body)
-    tray_id = data.get('tray_id', '').strip()
+    tray_id = normalize_jig_unload_tray_id(data.get('tray_id', ''))
     lot_id = data.get('lot_id', '').strip()
 
     print(f"[DEBUG] JU_Zone_validate_tray_id called with tray_id: '{tray_id}', lot_id: '{lot_id}'")
 
     if not tray_id:
         return JsonResponse({'success': False, 'error': 'Tray ID required.'})
+
+    if not is_valid_jig_unload_tray_id_format(tray_id):
+        return JsonResponse({
+            'success': False,
+            'error': f'Tray ID "{tray_id}" has invalid format. Expected format: XX-A00001'
+        })
+
+    allowed_lot_ids_for_trays = [lid.strip() for lid in lot_id.split(',') if lid.strip()] if lot_id else []
+    tray_conflict = find_jig_unload_tray_conflict(
+        tray_id,
+        allowed_lot_ids=allowed_lot_ids_for_trays,
+    )
+    if tray_conflict:
+        return JsonResponse({
+            'success': False,
+            'error': tray_conflict['message'],
+            'validation_type': 'tray_occupied',
+            'linked_lot': tray_conflict.get('linked_lot', ''),
+            'source': tray_conflict.get('source', ''),
+        })
 
     try:
         tray = TrayId.objects.get(tray_id=tray_id)
@@ -3415,7 +3564,7 @@ def JU_Zone_validate_tray_id_dynamic(request):
     """
     try:
         data = json.loads(request.body)
-        tray_id = data.get('tray_id', '').strip()
+        tray_id = normalize_jig_unload_tray_id(data.get('tray_id', ''))
         lot_id = data.get('lot_id', '').strip()
         plating_color = data.get('plating_color', '').strip()
 
@@ -3619,6 +3768,23 @@ def JU_Zone_validate_tray_id_dynamic(request):
         except Exception as e:
             print(f"[DEBUG] Zone 2 master data validation skipped due to error: {e}")
             # Non-fatal error - continue with other validations
+
+        allowed_lot_ids_for_trays = [lid.strip() for lid in lot_id.split(',') if lid.strip()] if lot_id else []
+        tray_conflict = find_jig_unload_tray_conflict(
+            tray_id,
+            allowed_lot_ids=allowed_lot_ids_for_trays,
+        )
+        if tray_conflict:
+            return JsonResponse({
+                'success': False,
+                'error': tray_conflict['message'],
+                'message': f'❌ {tray_id} - Already reserved for another lot',
+                'validation_type': 'tray_occupied',
+                'details': {
+                    'linked_lot': tray_conflict.get('linked_lot', ''),
+                    'source': tray_conflict.get('source', '')
+                }
+            }, status=400)
 
         try:
             # Step 1: Check if tray exists in system
@@ -3961,7 +4127,7 @@ class JU_Zone_Completedtable(LoginRequiredMixin, TemplateView):
                 jc = JigCompleted.objects.filter(jig_id=jig_qr_id).values('draft_data').first()
                 if jc and jc.get('draft_data'):
                     dd = jc['draft_data'] if isinstance(jc['draft_data'], dict) else {}
-                    bn = dd.get('bath_number') or dd.get('nickel_bath_number') or dd.get('bath_no')
+                    bn = dd.get('bath_number') or dd.get('nickel_bath_number') or dd.get('bath_no') or dd.get('nickel_bath_type')
                     if bn:
                         return str(bn)
         except Exception as e:
@@ -4072,6 +4238,16 @@ class JU_Zone_Completedtable(LoginRequiredMixin, TemplateView):
                         ).values('plating_color').first()
                         if _mmc:
                             _pc_name = _mmc.get('plating_color', '')
+                            if _pc_name and _pc_name != 'IPS':
+                                try:
+                                    _pc_obj = Plating_Color.objects.filter(
+                                        plating_color=_pc_name
+                                    ).first()
+                                    if _pc_obj:
+                                        rec.plating_color = _pc_obj
+                                        rec.save(update_fields=['plating_color'])
+                                except Exception:
+                                    pass
                             return _pc_name != 'IPS'
             # No color info — include by default (better to show than hide)
             return True
@@ -5314,6 +5490,38 @@ def JU_Zone_autosave_jig_unload(request):
             main_lot_id = data.get('main_lot_id', '')
             if not main_lot_id:
                 return JsonResponse({'success': False, 'error': 'main_lot_id required'})
+
+            tray_data = data.get('tray_data', [])
+            allowed_lot_ids_for_trays = [main_lot_id] + list(data.get('combined_lot_ids', []) or [])
+            seen_tray_ids = set()
+            for i, tray in enumerate(tray_data):
+                if not isinstance(tray, dict):
+                    continue
+                tray_id = normalize_jig_unload_tray_id(tray.get('tray_id', ''))
+                if not tray_id:
+                    continue
+                tray['tray_id'] = tray_id
+                if not is_valid_jig_unload_tray_id_format(tray_id):
+                    continue
+                if tray_id in seen_tray_ids:
+                    return JsonResponse({
+                        'success': False,
+                        'error': f'Duplicate tray ID "{tray_id}" in autosave data.'
+                    }, status=400)
+                seen_tray_ids.add(tray_id)
+                tray_conflict = find_jig_unload_tray_conflict(
+                    tray_id,
+                    allowed_lot_ids=allowed_lot_ids_for_trays,
+                )
+                if tray_conflict:
+                    return JsonResponse({
+                        'success': False,
+                        'error': tray_conflict['message'],
+                        'validation_type': 'tray_occupied',
+                        'linked_lot': tray_conflict.get('linked_lot', ''),
+                        'source': tray_conflict.get('source', ''),
+                        'tray_index': i,
+                    }, status=400)
             
             # Get user or session key
             user = request.user if request.user.is_authenticated else None
@@ -5337,7 +5545,7 @@ def JU_Zone_autosave_jig_unload(request):
             defaults.update({
                 'model_number': data.get('model_number', ''),
                 'total_quantity': data.get('total_quantity', 0),
-                'tray_data': data.get('tray_data', []),
+                'tray_data': tray_data,
                 'combined_lot_ids': data.get('combined_lot_ids', []),
                 'tray_type_capacity': data.get('tray_type_capacity', 'Normal - 20'),
                 'missing_qty': data.get('missing_qty', 0),

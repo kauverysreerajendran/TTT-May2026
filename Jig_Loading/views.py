@@ -3684,6 +3684,16 @@ class JigSaveAPI(APIView):
 		tray_capacity = int(payload.get('tray_capacity', 12) or 12)
 		plating_stock_num = payload.get('plating_stock_num', '') or ''
 		remarks = payload.get('remarks', '') or ''
+		resolved_plating_color = payload.get('plating_color', '') or ''
+		if not resolved_plating_color and batch_id:
+			batch_master = ModelMasterCreation.objects.filter(batch_id=batch_id).only('plating_color', 'plating_stk_no').first()
+			if batch_master:
+				resolved_plating_color = batch_master.plating_color or ''
+				if not plating_stock_num and batch_master.plating_stk_no:
+					plating_stock_num = batch_master.plating_stk_no
+					payload['plating_stock_num'] = plating_stock_num
+		if resolved_plating_color:
+			payload['plating_color'] = resolved_plating_color
 
 		# Preserve existing remarks if payload sends empty (remarks saved via /api/update-remark/)
 		if not remarks:

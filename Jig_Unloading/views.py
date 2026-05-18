@@ -25,6 +25,11 @@ from rest_framework import status
 from django.views.decorators.http import require_GET
 from Jig_Loading.models import *
 from Jig_Unloading.models import *
+from Jig_Unloading.tray_utils import (
+    find_jig_unload_tray_conflict,
+    is_valid_jig_unload_tray_id_format,
+    normalize_jig_unload_tray_id,
+)
 from Recovery_DP.models import *
 from Inprocess_Inspection.models import InprocessInspectionTrayCapacity
 from django.contrib.auth.mixins import LoginRequiredMixin
@@ -336,6 +341,12 @@ class Jig_Unloading_MainTable(LoginRequiredMixin, TemplateView):
                         batch_id__batch_id__in=batch_ids_to_check,
                         plating_color__plating_color__in=allowed_colors_list
                     ).values_list('batch_id__batch_id', flat=True)
+                )
+                ips_batch_ids.update(
+                    ModelMasterCreation.objects.filter(
+                        batch_id__in=batch_ids_to_check,
+                        plating_color__in=allowed_colors_list
+                    ).values_list('batch_id', flat=True)
                 )
                 for jig_lot_id, batch_id_str in jig_lot_to_batch.items():
                     if batch_id_str in ips_batch_ids:
@@ -762,7 +773,7 @@ class Jig_Unloading_MainTable(LoginRequiredMixin, TemplateView):
                 jig_detail.bath_number = _bn_row_z1['bath_number'] if _bn_row_z1 else None
             else:
                 _dd1 = getattr(jig_detail, 'draft_data', {}) or {}
-                _bn_str1 = _dd1.get('bath_number') or _dd1.get('bath_numbers') or _dd1.get('nickel_bath_number') or _dd1.get('bath_no')
+                _bn_str1 = (_dd1.get('bath_number') or _dd1.get('bath_numbers') or _dd1.get('nickel_bath_number') or _dd1.get('bath_no') or _dd1.get('nickel_bath_type'))
                 jig_detail.bath_number = str(_bn_str1) if _bn_str1 else None
 
             # Fallback: if bath_number still None, try to find from another JigCompleted with same jig_id
@@ -1834,7 +1845,7 @@ class JigUnloading_Completedtable(LoginRequiredMixin, TemplateView):
                 jc = JigCompleted.objects.filter(jig_id=jig_qr_id).values('draft_data').first()
                 if jc and jc.get('draft_data'):
                     dd = jc['draft_data'] if isinstance(jc['draft_data'], dict) else {}
-                    bn = dd.get('bath_number') or dd.get('nickel_bath_number') or dd.get('bath_no')
+                    bn = dd.get('bath_number') or dd.get('nickel_bath_number') or dd.get('bath_no') or dd.get('nickel_bath_type')
                     if bn:
                         return str(bn)
         except Exception as e:
@@ -1929,6 +1940,15 @@ class JigUnloading_Completedtable(LoginRequiredMixin, TemplateView):
                             batch_id=_jc.batch_id
                         ).values('plating_color').first()
                         if _mmc and _mmc.get('plating_color') in allowed_colors_set:
+                            try:
+                                _pc_obj = Plating_Color.objects.filter(
+                                    plating_color=_mmc['plating_color']
+                                ).first()
+                                if _pc_obj:
+                                    rec.plating_color = _pc_obj
+                                    rec.save(update_fields=['plating_color'])
+                            except Exception:
+                                pass
                             return True
             return False
 
@@ -2601,24 +2621,27 @@ class GetUnloadModelsZ1View(APIView):
         """Get tray_type, tray_capacity, tray_code, tray_color from ModelMaster.
         Capacity is determined by Jig Unloading spec (Normal=20, Jumbo=12),
         overriding the DB value which may be stale (e.g. 16 for Normal trays).
-        TrayType.tray_type (e.g. NR, NB, ND, JB, JR) IS the tray_code.
-        TrayType.tray_color is the authoritative color from DB.
+        ModelMaster.tray_code is the tray-code SSOT.
+        TrayType remains the tray category (Normal/Jumbo).
         """
         if not model_master:
             return '', 20, '', ''
         tray_type_obj = model_master.tray_type
+        tray_code = (getattr(model_master, 'tray_code', '') or '').strip().upper()
         if tray_type_obj:
-            tray_code  = tray_type_obj.tray_type or ''      # e.g. NR, NB, ND, JB, JR, JD, NL
+            tray_type = tray_type_obj.tray_type or ''
+            if not tray_code:
+                tray_code = tray_type
             tray_color = tray_type_obj.tray_color or ''     # e.g. Red, Blue, D.Green, L.Green
             # Jig Unloading spec: Normal tray codes = 20, Jumbo = 12 (override DB)
             _tc = tray_code.upper()
             if _tc in ('NORMAL', 'NR', 'NB', 'ND', 'NL', 'NW'):
                 tray_capacity = 20
-            elif _tc in ('JUMBO', 'JR', 'JB', 'JD'):
+            elif _tc in ('JUMBO', 'JR', 'JB', 'JD', 'JL'):
                 tray_capacity = 12
             else:
                 tray_capacity = tray_type_obj.tray_capacity or 20
-            return tray_code, tray_capacity, tray_code, tray_color
+            return tray_type, tray_capacity, tray_code, tray_color
         # Fallback: ModelMaster.tray_capacity (direct field)
         tray_capacity = model_master.tray_capacity or 20
         return '', tray_capacity, '', ''
@@ -2787,11 +2810,19 @@ class GetUnloadModelsZ1View(APIView):
             # Determine draft status for this model
             has_draft = bool(submitted_data and submitted_data.get('is_draft'))
 
-            # Plating color display name from TotalStockModel
+            # Plating color display name — try TotalStockModel → mmc → JigCompleted draft_data
             plating_color_name = ''
             _tsm = TotalStockModel.objects.filter(lot_id=lot_id).select_related('plating_color').first()
             if _tsm and _tsm.plating_color:
                 plating_color_name = _tsm.plating_color.plating_color
+            if not plating_color_name and mmc:
+                plating_color_name = getattr(mmc, 'plating_color', '') or ''
+            if not plating_color_name:
+                _jc_pc = JigCompleted.objects.filter(
+                    Q(lot_id=lot_id) | Q(draft_data__lot_id_quantities__has_key=lot_id)
+                ).values('draft_data').first()
+                if _jc_pc and isinstance(_jc_pc.get('draft_data'), dict):
+                    plating_color_name = _jc_pc['draft_data'].get('plating_color', '') or ''
 
             # Check if already submitted as standalone lot
             is_submitted_lot = JigUnloadAfterTable.objects.filter(
@@ -3018,26 +3049,54 @@ class SaveModelUnloadZ1View(APIView):
                             f'Please ensure tray distribution is correct.'
                 }, status=400)
 
-        # Validate tray IDs (only for final save, not draft)
+        allowed_lot_ids_for_trays = [lot_id] + [
+            str(merged_lot.get('lot_id') or '').strip()
+            for merged_lot in merged_lots
+            if str(merged_lot.get('lot_id') or '').strip()
+        ]
+        seen_tray_ids = set()
+        for tray in tray_data:
+            tray_id = normalize_jig_unload_tray_id(tray.get('tray_id', ''))
+            if tray_id:
+                tray['tray_id'] = tray_id
+            if not tray_id:
+                if not is_draft:
+                    return Response({'error': 'All tray slots must be scanned'}, status=400)
+                continue
+            if not is_valid_jig_unload_tray_id_format(tray_id):
+                return Response({
+                    'error': f'Tray ID "{tray_id}" has invalid format. Expected format: XX-A00001'
+                }, status=400)
+            if len(tray_id) > 9:
+                return Response({'error': f'Tray ID "{tray_id}" exceeds 9 characters'}, status=400)
+            if tray_id in seen_tray_ids:
+                return Response({'error': f'Duplicate tray ID "{tray_id}" — each tray must be unique'}, status=400)
+            seen_tray_ids.add(tray_id)
+            # Tray code prefix validation: tray_id must start with the expected tray_code prefix
+            if tray_code:
+                expected_prefix = tray_code.upper() + '-'
+                if not tray_id.upper().startswith(expected_prefix):
+                    return Response({
+                        'error': f'Tray ID "{tray_id}" does not match expected tray code "{tray_code}". '
+                                 f'Expected prefix: {expected_prefix}'
+                    }, status=400)
+
+            tray_conflict = find_jig_unload_tray_conflict(
+                tray_id,
+                allowed_lot_ids=allowed_lot_ids_for_trays,
+            )
+            if tray_conflict:
+                return Response({
+                    'error': tray_conflict['message'],
+                    'validation_type': 'tray_occupied',
+                    'linked_lot': tray_conflict.get('linked_lot', ''),
+                    'source': tray_conflict.get('source', ''),
+                }, status=400)
+
+        # Validate completed tray IDs against tray master (only for final save)
         if not is_draft:
-            seen_tray_ids = set()
             for tray in tray_data:
                 tray_id = tray.get('tray_id', '')
-                if len(tray_id) > 9:
-                    return Response({'error': f'Tray ID "{tray_id}" exceeds 9 characters'}, status=400)
-                if not tray_id:
-                    return Response({'error': 'All tray slots must be scanned'}, status=400)
-                if tray_id in seen_tray_ids:
-                    return Response({'error': f'Duplicate tray ID "{tray_id}" — each tray must be unique'}, status=400)
-                seen_tray_ids.add(tray_id)
-                # Tray code prefix validation: tray_id must start with the expected tray_code prefix
-                if tray_code:
-                    expected_prefix = tray_code.upper() + '-'
-                    if not tray_id.upper().startswith(expected_prefix):
-                        return Response({
-                            'error': f'Tray ID "{tray_id}" does not match expected tray code "{tray_code}". '
-                                     f'Expected prefix: {expected_prefix}'
-                        }, status=400)
 
                 # Tray occupancy validation: reject trays already assigned to another lot
                 existing_tray = TrayId.objects.filter(tray_id=tray_id).first()
@@ -3856,6 +3915,20 @@ def validate_tray_occupancy_z1(request):
                     }, status=400)
 
         print(f"✅ [Z1] Tray code format valid: {tray_id} (prefix: {scanned_prefix})")
+
+        tray_conflict = find_jig_unload_tray_conflict(
+            tray_id,
+            allowed_lot_ids=[lot_id] if lot_id else [],
+        )
+        if tray_conflict:
+            return JsonResponse({
+                'success': False,
+                'error': tray_conflict['message'],
+                'message': f'❌ {tray_id} - Already reserved for another lot',
+                'validation_type': 'tray_occupied',
+                'linked_lot': tray_conflict.get('linked_lot', ''),
+                'source': tray_conflict.get('source', '')
+            }, status=400)
 
         # STEP 3: Check occupancy in TrayId table
         existing_tray = TrayId.objects.filter(tray_id=tray_id).first()

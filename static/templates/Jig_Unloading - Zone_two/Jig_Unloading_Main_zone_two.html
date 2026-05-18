@@ -1683,7 +1683,7 @@ body.add-model-mode #selectAllCheckbox {
                             style="display:{% if jig_detail.unload_hold_lot or jig_detail.unload_release_lot or jig_detail.unload_holding_reason or data.unload_release_reason %}inline-block{% else %}none{% endif %}; cursor:pointer;" 
                             title="{% if jig_detail.unload_holding_reason %}Holding Reason: {{ jig_detail.unload_holding_reason }}{% endif %}{% if jig_detail.unload_holding_reason and jig_detail.unload_release_reason %}&#10;{% endif %}{% if jig_detail.unload_release_reason %}Release Reason: {{ jig_detail.unload_release_reason }}{% endif %}">
                         {% if jig_detail.unload_hold_lot or jig_detail.unload_release_lot or jig_detail.unload_holding_reason or jig_detail.unload_release_reason %}
-                          <img src="{% static 'assets/icons/view2.png' %}" alt="Remark" style="width:12px; height:12px;" />
+                          <img src="{% static 'assets/icons/view.png' %}" alt="Remark" style="width:12px; height:12px;" />
                         {% endif %}
                       </span>
                     {% else %}
@@ -1691,7 +1691,7 @@ body.add-model-mode #selectAllCheckbox {
                         <span class="hold-remark-icon" 
                               style="display:inline-block; cursor:pointer;" 
                               title="{% if jig_detail.unload_holding_reason %}Holding Reason: {{ jig_detail.unload_holding_reason }}{% endif %}{% if jig_detail.unload_holding_reason and jig_detail.unload_release_reason %}&#10;{% endif %}{% if jig_detail.unload_release_reason %}Release Reason: {{ jig_detail.unload_release_reason }}{% endif %}">
-                          <img src="{% static 'assets/icons/view2.png' %}" alt="View Reason" style="width:18px; height:18px;" />
+                          <img src="{% static 'assets/icons/view.png' %}" alt="View Reason" style="width:18px; height:18px;" />
                         </span>
                       {% endif %}
                     {% endif %}
@@ -1718,7 +1718,7 @@ body.add-model-mode #selectAllCheckbox {
                           <a href="#" class="text-success z1-view-btn" style="text-decoration: none; font-weight:600;"
                              data-jig-completed-id="{{ jig_detail.id }}"
                              title="View unloaded tray data">
-                             <img src="{% static 'assets/icons/view2.png' %}" alt="View" style="width:18px; height:18px; margin-right:4px; vertical-align:middle;" />
+                             <img src="{% static 'assets/icons/view.png' %}" alt="View" style="width:18px; height:18px; margin-right:4px; vertical-align:middle;" />
                              <span>Unloaded</span>
                           </a>
                         {% else %}

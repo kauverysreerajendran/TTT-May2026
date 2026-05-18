@@ -730,7 +730,7 @@ td:first-child * {
   left: 0;
   bottom: 30px; /* Place above the footer */
   width: 100vw;
-  background: #f5f7ff;
+  background: #ffffff;
   z-index: 101;
 
   padding: 15px 0 0 0;

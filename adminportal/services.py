@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 USER_MODULE_CACHE_TTL = 300
 USER_GROUP_NAMES_CACHE_TTL = 300
-MODULE_REGISTRY_CACHE_KEY = 'adminportal_module_registry_seeded_v3'
+MODULE_REGISTRY_CACHE_KEY = 'adminportal_module_registry_seeded_v4'
 MODULE_REGISTRY_NAMES = [entry['name'] for entry in MODULE_REGISTRY]
 
 DASHBOARD_MODULE_ACCESS = {
@@ -36,8 +36,15 @@ DASHBOARD_MODULE_ACCESS = {
     'Jig Loading': {'Jig Pick Table', 'Jig Completed Table'},
     'Jig Unloading': {'JUL Main Table', 'JUL Completed', 'JUL Main Table Zone 2', 'JUL Completed Zone 2'},
     'Inprocess Inspection': {'IP Main', 'IP Completed'},
-    'Nickel Inspection': {'Nickel Main Table', 'Nickel Completed Table'},
-    'Nickel Audit': {'NA Pick Table', 'NA Completed'},
+    'Nickel Inspection': {
+        'Nickel Main Table', 'Nickel Completed Table',
+        'Nickel Inspection Zone 2 Pick Table', 'Nickel Inspection Zone 2 Completed Table',
+        'Nickel Inspection Zone 2 Reject Table',
+    },
+    'Nickel Audit': {
+        'NA Pick Table', 'NA Completed',
+        'Nickel Audit Zone 2 Pick Table', 'Nickel Audit Zone 2 Completed Table',
+    },
     'Spider Spindle': {
         'Spider Spindle', 'Spider Spindle Z1', 'Spider Spindle Z2',
         'Spider Spindle Z1 Pick Table', 'Spider Spindle Z1 Completed Table',
@@ -68,6 +75,10 @@ def ensure_module_registry_seeded():
             group, _ = Group.objects.get_or_create(name=group_name)
             modules = [module_by_name[name] for name in module_names if name in module_by_name]
             group.modules.set(modules)
+
+        admin_group, _ = Group.objects.get_or_create(name='Admin')
+        admin_group.modules.set(list(module_by_name.values()))
+        Group.objects.get_or_create(name='Normal User')
 
     cache.set(MODULE_REGISTRY_CACHE_KEY, True, timeout=USER_MODULE_CACHE_TTL)
 

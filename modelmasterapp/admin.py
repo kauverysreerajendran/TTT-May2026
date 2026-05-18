@@ -2,9 +2,9 @@ from django.contrib import admin
 from .models import *
 #test
 class ModelMasterAdmin(admin.ModelAdmin):
-    list_display = ['model_no', 'brand', 'ep_bath_type', 'tray_type_display', 'tray_capacity_display', 'plating_stk_no']
-    search_fields = ['model_no', 'brand', 'plating_stk_no']
-    list_filter = ['brand', 'ep_bath_type']
+    list_display = ['model_no', 'brand', 'ep_bath_type', 'tray_type_display', 'tray_code', 'tray_capacity_display', 'plating_stk_no']
+    search_fields = ['model_no', 'brand', 'plating_stk_no', 'tray_code']
+    list_filter = ['brand', 'ep_bath_type', 'tray_code']
 
     def tray_type_display(self, obj):
         if obj.tray_type:
