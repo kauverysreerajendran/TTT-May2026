@@ -1123,6 +1123,7 @@
       }).filter(Boolean),
       delink_tray_ids: (state.delinkScans || []).map(function (d) { return d.tray_id; }),
       remarks: ($("isrm-remarks") || {}).value || "",
+      full_lot_reject: state.fullLotReject || false,
     };
 
     // Local fallback – retained so UI state is recoverable if the network
@@ -1135,6 +1136,7 @@
         acceptScans: state.acceptScans,
         delinkScans: state.delinkScans,
         remarks: payload.remarks,
+        full_lot_reject: state.fullLotReject || false,
       }));
     } catch (e) { /* storage full – ignore, backend is SSOT */ }
 
@@ -1278,6 +1280,14 @@
     }
     var rmEl = $("isrm-remarks");
     if (rmEl && draft.remarks) rmEl.value = draft.remarks;
+    // Restore lot-rejection toggle
+    if (draft.full_lot_reject) {
+      var lotRejEl = $("isrm-lot-reject-toggle");
+      if (lotRejEl && !lotRejEl.checked) {
+        lotRejEl.checked = true;
+        lotRejEl.dispatchEvent(new Event("change"));
+      }
+    }
     updateTotals();
     scheduleSlotPlan();
     setInsight("info", isBackend ? "Draft restored from server." : "Draft restored.");

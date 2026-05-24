@@ -49,6 +49,11 @@ def get_stock_flag_updates(submission_type, accepted_qty, rejected_qty):
             'next_process_module': 'Brass Audit',
             'last_process_module': 'Brass QC',
             'send_brass_audit_to_iqf': False,
+            # Clear BA-return flags so lot exits BQC PT and re-enters BA PT
+            'send_brass_audit_to_qc': False,
+            'brass_audit_rejection': False,
+            # Reset BA verification — user must manually verify in BA PT
+            'brass_audit_accepted_qty_verified': False,
         }
     elif submission_type == "FULL_REJECT":
         return {

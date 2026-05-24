@@ -560,9 +560,78 @@ box-shadow: 2px 0 8px rgba(0,0,0,0.04);
     grid-template-columns: 30px 1fr 70px 90px !important;
   }
 }
+
+/* Input Screening Completed table final layout overrides */
+.is-completed-table-page {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto !important;
+  min-height: 0 !important;
+  overflow: hidden !important;
+  padding-top: 0.75rem !important;
+  padding-bottom: 0 !important;
+}
+
+.is-completed-table-page > .col-12.grid-margin.stretch-card {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  margin-bottom: 0 !important;
+}
+
+.is-completed-table-page .card,
+.is-completed-table-page .card-body {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.is-completed-table-page .card {
+  margin-bottom: 0 !important;
+}
+
+.is-completed-table-page .card-body {
+  flex-direction: column;
+  padding-bottom: 0.5rem !important;
+  overflow: hidden !important;
+}
+
+.is-completed-table-page h4.text-left,
+.is-completed-table-page .calendar-bar,
+.is-completed-table-page .pagination-wrapper {
+  flex: 0 0 auto;
+}
+
+.is-completed-table-page .table-responsive {
+  flex: 1 1 0 !important;
+  width: 100%;
+  height: auto !important;
+  max-height: none !important;
+  min-height: 0;
+  overflow-x: auto !important;
+  overflow-y: auto !important;
+  scrollbar-gutter: stable;
+  margin-bottom: 0 !important;
+}
+
+.is-completed-table-page .pagination-wrapper {
+  position: static !important;
+  left: auto !important;
+  right: auto !important;
+  bottom: auto !important;
+  width: 100% !important;
+  min-height: 42px !important;
+  padding: 4px 0 0 !important;
+  margin-top: 0.35rem !important;
+  background: #ffffff !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  z-index: 4 !important;
+}
 </style>
  
-<div class="content-wrapper">
+<div class="content-wrapper is-completed-table-page">
       <div class="col-12 grid-margin stretch-card">
         <div class="card">
           <div class="card-body" style="padding-bottom:12px;">
@@ -607,7 +676,7 @@ box-shadow: 2px 0 8px rgba(0,0,0,0.04);
           
          
             <!-- Table Section -->
-            <div class="table-responsive" style="overflow: scroll !important; max-height:330px !important;">
+            <div class="table-responsive" style="overflow: auto !important;">
               <table id="order-listing" class="table">
                 <thead>
                     <tr>
@@ -840,6 +909,7 @@ box-shadow: 2px 0 8px rgba(0,0,0,0.04);
               
                 </tbody>
               </table>
+            </div>
 <div
   id="trayScanModal_DayPlanning"
   class="tray-scan-modal-DayPlanning"

@@ -697,6 +697,7 @@ def get_reject_modal_context(lot_id: str) -> Dict[str, Any]:
             "reject_assignments": stored_data.get("reject_assignments", []),
             "accept_assignments": stored_data.get("accept_assignments", []),
             "delinked_tray_ids": stored_data.get("delinked_tray_ids", []),
+            "full_lot_reject": stored_data.get("full_lot_reject", False),
         }
 
     return {
@@ -1545,6 +1546,7 @@ def save_draft_partial_reject(
     accept_assignments: List[Dict[str, Any]],
     remarks: str,
     user,
+    full_lot_reject: bool = False,
 ) -> Dict[str, Any]:
     """Persist the current Rejection-Window state as a draft.
 
@@ -1626,6 +1628,7 @@ def save_draft_partial_reject(
         "accept_assignments": accept_trays_json,
         "delinked_tray_ids": delinked_ids,
         "active_trays_count": len(active_trays),
+        "full_lot_reject": bool(full_lot_reject),
     }
 
     from .models import IP_Rejection_Draft

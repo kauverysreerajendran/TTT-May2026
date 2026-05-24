@@ -7,6 +7,23 @@
       opacity: 1 !important;
       user-select: none !important;
     }
+
+/* IS Pick Table — keep pagination inside the card flow (not viewport-fixed) */
+.is-pick-table-page .pagination-wrapper {
+  position: static !important;
+  left: auto !important;
+  right: auto !important;
+  bottom: auto !important;
+  width: 100% !important;
+  min-height: 42px !important;
+  padding: 4px 0 0 !important;
+  margin-top: 0.35rem !important;
+  background: #ffffff !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  z-index: 4 !important;
+}
     
     /* Override any conflicting styles when modal is open */
     .new-popup-modal.open #acceptedTrayCancelBtn {

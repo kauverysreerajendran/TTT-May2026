@@ -404,13 +404,13 @@ box-shadow: 2px 0 8px rgba(0,0,0,0.04);
 
 /* Day Planning completed table final layout overrides */
 .dp-table-page {
-  --dp-table-font-size: var(--ttt-font-size-table, 12px);
-  --dp-table-header-font-size: var(--ttt-font-size-table-header, 12px);
+  --dp-table-font-size: 16px !important;
+  --dp-table-header-font-size: 16px !important;
   display: flex;
   flex-direction: column;
   flex: 1 1 auto;
-  height: var(--ttt-dynamic-page-height, calc(100vh - var(--ttt-navbar-height, 60px) - var(--ttt-footer-height, 32px))) !important;
-  max-height: var(--ttt-dynamic-page-height, calc(100vh - var(--ttt-navbar-height, 60px) - var(--ttt-footer-height, 32px))) !important;
+  height: 288px !important;
+  max-height: 288px !important;
   min-height: 0 !important;
   overflow: hidden !important;
   padding-top: 0.75rem !important;
@@ -481,9 +481,9 @@ box-shadow: 2px 0 8px rgba(0,0,0,0.04);
 .dp-table-page #order-listing td {
   box-sizing: border-box !important;
   height: auto !important;
-  padding: var(--ttt-table-cell-padding-y, 4px) var(--ttt-table-cell-padding-x, 7px) !important;
+  padding: 2px var(--ttt-table-cell-padding-x, 7px) !important;
   font-size: var(--dp-table-font-size) !important;
-  line-height: var(--ttt-line-height-table, 1.16) !important;
+  line-height: 1.1 !important;
   vertical-align: middle !important;
   white-space: nowrap !important;
   overflow: hidden !important;
@@ -504,7 +504,7 @@ box-shadow: 2px 0 8px rgba(0,0,0,0.04);
 }
 
 .dp-table-page #order-listing tbody tr {
-  height: var(--ttt-table-row-height, 32px) !important;
+  height: 24px !important;
 }
 
 .dp-table-page #order-listing th .fa-filter,
@@ -526,8 +526,8 @@ box-shadow: 2px 0 8px rgba(0,0,0,0.04);
   position: sticky !important;
   left: 0 !important;
   width: 70px !important;
-  min-width: 70px !important;
-  max-width: 70px !important;
+  min-width: 80px !important;
+  max-width: 80px !important;
   background: #f7fafd !important;
 }
 

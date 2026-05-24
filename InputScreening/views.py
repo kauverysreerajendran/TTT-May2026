@@ -467,6 +467,7 @@ class IS_SaveDraftAPI(APIView):
                 delink_tray_ids=parsed["delink_tray_ids"],
                 accept_assignments=parsed["accept_assignments"],
                 remarks=parsed["remarks"],
+                full_lot_reject=parsed.get("full_lot_reject", False),
                 user=request.user,
             )
         except ValueError as exc:

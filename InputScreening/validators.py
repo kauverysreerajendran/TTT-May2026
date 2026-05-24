@@ -370,6 +370,7 @@ def parse_draft_payload(data: dict) -> dict:
         raise ValidationError("delink_tray_ids must be a list.")
 
     remarks = clean_str(data.get("remarks", ""), max_len=500)
+    full_lot_reject = bool(data.get("full_lot_reject", False))
 
     return {
         "lot_id": lot_id,
@@ -378,6 +379,6 @@ def parse_draft_payload(data: dict) -> dict:
         "delink_tray_ids": delink_ids,
         "accept_assignments": accept_assignments,
         "remarks": remarks,
+        "full_lot_reject": full_lot_reject,
     }
-
 

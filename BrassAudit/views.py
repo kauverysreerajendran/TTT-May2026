@@ -1380,7 +1380,19 @@ def _handle_audit_submission(request, action):
         is_completed=True
     ).order_by('-id').first()
 
-    if existing:
+    # ── Re-entry detection ──
+    # A lot may return to Brass Audit after the cycle: BA FULL_REJECT → BQC → BA (2nd pass).
+    # When that happens an old completed BA submission exists, but the stock flags confirm
+    # the current pass has NOT been processed yet (no BA accept / reject / few-cases flag).
+    # In that case we allow a fresh submission instead of blocking with "Already submitted".
+    is_ba_reentry = (
+        existing is not None
+        and not stock.brass_audit_accptance
+        and not stock.brass_audit_rejection
+        and not stock.brass_audit_few_cases_accptance
+    )
+
+    if existing and not is_ba_reentry:
         return JsonResponse({
             "success": True,
             "message": "Already submitted",
@@ -1389,6 +1401,13 @@ def _handle_audit_submission(request, action):
             "reject_lot_id": existing.transition_reject_lot_id,
             "transition_lot_id": existing.transition_lot_id,
         })
+
+    if is_ba_reentry:
+        logger.info(
+            f"[AUDIT] BA re-entry from BQC detected for lot_id={lot_id} "
+            f"(prev submission id={existing.id}, type={existing.submission_type}). "
+            f"Allowing fresh BA processing."
+        )
 
     tray_data, source, total_qty = _resolve_lot_trays_audit(lot_id)
     if not tray_data:

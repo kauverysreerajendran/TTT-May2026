@@ -1959,9 +1959,11 @@ document.addEventListener('DOMContentLoaded', function() {
             const data = await resp.json();
 
             if (data.success) {
+              const qtyLine = (data.accepted_qty !== undefined && data.accepted_qty !== null) ? `<br>Qty: ${data.accepted_qty}` : '';
+              const statusLine = data.status ? `<br>Status: ${data.status}` : '';
               Swal.fire({
                 title: 'Lot Accepted',
-                html: `<b>${data.message}</b><br>Qty: ${data.accepted_qty}<br>Status: ${data.status}`,
+                html: `<b>${data.message}</b>${qtyLine}${statusLine}`,
                 icon: 'success',
                 showConfirmButton: false,
                 timer: 2000,
