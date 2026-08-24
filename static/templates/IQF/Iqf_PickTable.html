@@ -2214,9 +2214,16 @@
                         <img src="{% static 'assets/icons/chat_icon.png' %}" alt="Chat Disabled" style="width: 20px; height: 20px; filter: grayscale(1) opacity(0.5);" />
                       </span>
                     {% endif %}
+                    <!-- Previous-module remark info icons: show only when a previous remark exists.
+                         Match Brass Audit Pick Table behavior — no disabled/empty info icon. -->
                     {% if data.IP_pick_remarks %}
-                      <a href="#" title="IS Remark: {{ data.IP_pick_remarks }}" class="prev-remark-tooltip-trigger" style="margin-left: 5px;">
-                        <i class="fa fa-info-circle" style="color: #17a2b8; font-size: 16px;"></i>
+                      <a href="#" title="IS Remark: {{ data.IP_pick_remarks }}" style="margin-left: 5px;">
+                        <i class="fa fa-info-circle" style="color: #007bff; font-size: 16px;"></i>
+                      </a>
+                    {% endif %}
+                    {% if data.Bq_pick_remarks %}
+                      <a href="#" title="BQ Remark: {{ data.Bq_pick_remarks }}" style="margin-left: 5px;">
+                        <i class="fa fa-info-circle" style="color: #28a745; font-size: 16px;"></i>
                       </a>
                     {% endif %}
                     <a href="#" class="remark-history-btn" data-lot-id="{{ data.stock_lot_id }}" title="View full remark history" style="margin-left: 5px; color: #6c757d; font-size: 15px; display: inline-flex; align-items: center;">
@@ -4485,7 +4492,42 @@ document.addEventListener('click', function(evt){
     // ERR3 FIX: Correct qty distribution
     //   top tray = totalIqfQty % capacity  (the partial / remainder tray)
     //   all others = capacity              (strictly fully filled)
-    var _cap = window._iqfTrayCapacity || 16;
+    // Resolve capacity from the CURRENT model/lot first.
+    // This prevents a previous model's capacity (for example 16)
+    // from carrying over when another 1805 model is opened.
+    var _cap = 0;
+    var _currentModelNo = '';
+    var _modelEl = document.getElementById('modalModelNo');
+    if(_modelEl){
+      _currentModelNo = String(_modelEl.textContent || '').trim().toUpperCase();
+    }
+
+    // Series-specific IQF capacity.
+    if(_currentModelNo.indexOf('1805') === 0){
+      _cap = 12;
+    }else if(_currentModelNo.indexOf('2649') === 0 || _currentModelNo.indexOf('2617') === 0){
+      _cap = 16;
+    }
+
+    // For other series, use the current lot tray capacity.
+    if(_cap <= 0){
+      var _currentLotTraysForCap = window._iqfCurrentLotTrays || [];
+      for(var _ctc = 0; _ctc < _currentLotTraysForCap.length; _ctc++){
+        var _lotCap = parseInt(_currentLotTraysForCap[_ctc].tray_capacity || 0, 10);
+        if(_lotCap > 0){
+          _cap = _lotCap;
+          break;
+        }
+      }
+    }
+
+    // Final fallback to the backend value.
+    if(_cap <= 0){
+      _cap = parseInt(window._iqfTrayCapacity || 16, 10);
+    }
+
+    console.log('[IQF REJECT CAPACITY] model=', _currentModelNo, 'capacity=', _cap);
+
     var _rem = totalIqfQty % _cap;
     var _fullCount = Math.floor(totalIqfQty / _cap);
 

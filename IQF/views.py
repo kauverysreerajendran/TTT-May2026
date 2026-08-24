@@ -69,6 +69,35 @@ def _safe_int(value, default=0):
         return default
 
 
+
+
+def _get_series_tray_capacity(batch):
+    """
+    Return IQF tray capacity based on the product series.
+
+    1805 -> 12
+    2649 -> 16
+    2617 -> 16
+
+    For other series, preserve the existing configured batch capacity.
+    """
+    if not batch:
+        return 16
+
+    series_source = str(getattr(batch, 'plating_stk_no', '') or '').strip()
+
+    if not series_source:
+        model_stock = getattr(batch, 'model_stock_no', None)
+        series_source = str(getattr(model_stock, 'model_no', '') or '').strip()
+
+    series = series_source[:4]
+
+    return {
+        '1805': 12,
+        '2649': 16,
+        '2617': 16,
+    }.get(series, getattr(batch, 'tray_capacity', None) or 16)
+
 def _resolve_tray_type_capacity_from_trays(tray_ids, lot_ids=None, fallback_type='', fallback_capacity=0):
     """Resolve tray type/capacity from actual tray records, with batch as last fallback."""
     clean_tray_ids = [str(tid or '').strip().upper() for tid in tray_ids if str(tid or '').strip()]
@@ -108,6 +137,31 @@ def _resolve_tray_type_capacity_from_trays(tray_ids, lot_ids=None, fallback_type
             return brass_meta.get('tray_type') or fallback_type, brass_meta.get('tray_capacity') or fallback_capacity
 
     return fallback_type, fallback_capacity
+
+
+def _release_iqf_delinked_physical_trays(tray_ids):
+    """Release explicitly delinked physical trays while preserving IQF history."""
+    clean_tray_ids = [str(tid or '').strip().upper() for tid in tray_ids if str(tid or '').strip()]
+    if not clean_tray_ids:
+        return 0
+
+    freed = TrayId.objects.filter(tray_id__in=clean_tray_ids).update(
+        delink_tray=True,
+        lot_id=None,
+        batch_id=None,
+        scanned=False,
+        IP_tray_verified=False,
+        rejected_tray=False,
+        brass_rejected_tray=False,
+        top_tray=False,
+        new_tray=True,
+    )
+
+    BrassTrayId.objects.filter(tray_id__in=clean_tray_ids).update(delink_tray=True)
+    BrassAuditTrayId.objects.filter(tray_id__in=clean_tray_ids).update(delink_tray=True)
+    IPTrayId.objects.filter(tray_id__in=clean_tray_ids).update(delink_tray=True)
+
+    return freed
 
 
 def _build_iqf_rejection_details(raw_items, fallback_lot_id=None, fallback_total=None):
@@ -311,6 +365,12 @@ class IQFPickTableView(APIView):
             )
             batch_ids = list(batch_reentry.values_list('lot_id', flat=True))
             if batch_ids:
+                # IMPORTANT:
+                # This is a NEW IQF processing cycle. Do not carry the previous
+                # IQF Accept/Reject quantities into the new IQF stage.
+                # The Brass Audit rejection quantity is only the INPUT to IQF;
+                # it is NOT an IQF rejection until IQF processing is completed.
+                # Also do not touch total_stock / batch quantity here.
                 batch_reentry.update(
                     send_brass_audit_to_iqf=True,
                     iqf_acceptance=False,
@@ -318,6 +378,9 @@ class IQFPickTableView(APIView):
                     iqf_few_cases_acceptance=False,
                     iqf_accepted_qty_verified=False,
                     iqf_onhold_picking=False,
+                    iqf_accepted_qty=0,
+                    iqf_rejection_qty=0,
+                    iqf_after_rejection_qty=0,
                     brass_audit_rejection=False,
                     send_brass_audit_to_qc=False,
                 )
@@ -351,6 +414,13 @@ class IQFPickTableView(APIView):
                 )
                 partial_ids = list(partial_reentry.values_list('lot_id', flat=True))
                 if partial_ids:
+                    # IMPORTANT:
+                    # Brass Audit PARTIAL rejection only moves the rejected
+                    # quantity INTO IQF. It must not become an IQF Accept or
+                    # IQF Reject result automatically.
+                    #
+                    # Start the new IQF cycle with both result quantities = 0.
+                    # Do NOT modify total_stock / batch quantity.
                     partial_reentry.update(
                         send_brass_audit_to_iqf=True,
                         iqf_acceptance=False,
@@ -358,7 +428,11 @@ class IQFPickTableView(APIView):
                         iqf_few_cases_acceptance=False,
                         iqf_accepted_qty_verified=False,
                         iqf_onhold_picking=False,
+                        iqf_accepted_qty=0,
+                        iqf_rejection_qty=0,
+                        iqf_after_rejection_qty=0,
                     )
+                    
                     # Clean stale IQF data so lot gets fresh processing
                     for lid in partial_ids:
                         IQF_Submitted.objects.filter(lot_id=lid).delete()
@@ -463,8 +537,21 @@ class IQFPickTableView(APIView):
                 'iqf_physical_qty': stock_obj.iqf_physical_qty,
                 'iqf_physical_qty_edited': stock_obj.iqf_physical_qty_edited,
                 'accepted_tray_scan_status': stock_obj.accepted_tray_scan_status,
-                'iqf_rejection_qty': stock_obj.iqf_rejection_qty,
-                'iqf_accepted_qty': stock_obj.iqf_accepted_qty,
+                # IMPORTANT: A lot entering IQF from Brass Audit starts a NEW IQF
+                # processing cycle. Any old IQF Accept/Reject quantity must NOT
+                # appear in the Pick Table until IQF actually verifies/processes it.
+                # The Brass Audit rejected quantity is only the incoming quantity
+                # for IQF; it is not an IQF Accept or IQF Reject result.
+                # Once iqf_accepted_qty_verified becomes True, show the real IQF
+                # result quantities.
+                'iqf_rejection_qty': (
+                    0 if (stock_obj.send_brass_audit_to_iqf and not stock_obj.iqf_accepted_qty_verified)
+                    else (stock_obj.iqf_rejection_qty or 0)
+                ),
+                'iqf_accepted_qty': (
+                    0 if (stock_obj.send_brass_audit_to_iqf and not stock_obj.iqf_accepted_qty_verified)
+                    else (stock_obj.iqf_accepted_qty or 0)
+                ),
                 'IQF_pick_remarks': stock_obj.IQF_pick_remarks,
                 'Bq_pick_remarks': stock_obj.Bq_pick_remarks,
                 'BA_pick_remarks': stock_obj.BA_pick_remarks,
@@ -1246,30 +1333,8 @@ def iqf_submit_audit(request):
 
             # ── Helper: resolve tray capacity for an IQFTrayId record ──
             def _resolve_tray_capacity(iqf_tray_obj):
-                """Resolve the REAL capacity for a tray.
-                Priority: IQFTrayId.tray_capacity → BrassTrayId → TrayId master → ModelMaster → 16
-                """
-                cap = getattr(iqf_tray_obj, 'tray_capacity', None)
-                if cap and cap > 0:
-                    return cap
-                # BrassTrayId (same tray_id, any lot)
-                brass = BrassTrayId.objects.filter(tray_id=iqf_tray_obj.tray_id).exclude(
-                    tray_capacity__isnull=True).first()
-                if brass and brass.tray_capacity and brass.tray_capacity > 0:
-                    return brass.tray_capacity
-                # TrayId master
-                tray_master = TrayId.objects.filter(tray_id=iqf_tray_obj.tray_id).exclude(
-                    tray_capacity__isnull=True).first()
-                if tray_master and tray_master.tray_capacity and tray_master.tray_capacity > 0:
-                    return tray_master.tray_capacity
-                # ModelMasterCreation (via TotalStockModel.batch_id)
-                try:
-                    mmc_cap = ts.batch_id.tray_capacity if ts.batch_id else None
-                    if mmc_cap and mmc_cap > 0:
-                        return mmc_cap
-                except Exception:
-                    pass
-                return 16  # safe default
+                """Resolve capacity from the product series for this IQF lot."""
+                return _get_series_tray_capacity(ts.batch_id)
 
             if submission_type == IQF_Submitted.SUB_FULL_ACCEPT:
                 # ✅ FULL ACCEPT — Use actual IQFTrayId.tray_quantity when reliable,
@@ -2788,16 +2853,8 @@ def iqf_accepted_tray_slots(request):
             return Response({'success': False, 'error': 'Lot not found'}, status=404)
 
         def _resolve_capacity():
-            """Resolve tray capacity: IQFTrayId.tray_capacity → BrassTrayId → ModelMaster → 16"""
-            iqf_tray = IQFTrayId.objects.filter(lot_id=lot_id, delink_tray=False).exclude(tray_capacity__isnull=True).exclude(tray_capacity=0).first()
-            if iqf_tray and iqf_tray.tray_capacity and iqf_tray.tray_capacity > 0:
-                return iqf_tray.tray_capacity
-            brass_tray = BrassTrayId.objects.filter(lot_id=lot_id, delink_tray=False).exclude(tray_capacity__isnull=True).exclude(tray_capacity=0).first()
-            if brass_tray and brass_tray.tray_capacity and brass_tray.tray_capacity > 0:
-                return brass_tray.tray_capacity
-            if ts.batch_id and ts.batch_id.tray_capacity and ts.batch_id.tray_capacity > 0:
-                return ts.batch_id.tray_capacity
-            return 16  # safe default
+            """Resolve IQF tray capacity from the product series."""
+            return _get_series_tray_capacity(ts.batch_id)
 
         tray_capacity = _resolve_capacity()
 
@@ -2894,21 +2951,22 @@ def iqf_accepted_tray_slots(request):
             full_trays = accepted_qty // tray_capacity
             remainder = accepted_qty % tray_capacity
 
-            if remainder > 0:
-                slots.append({
-                    'slot_no': slot_no,
-                    'qty': remainder,
-                    'is_top_tray': True,
-                    'tray_id': '',
-                    'status': 'new',
-                })
-                slot_no += 1
-
+            # Allocate full-capacity trays first, then the remainder.
             for _ in range(full_trays):
                 slots.append({
                     'slot_no': slot_no,
                     'qty': tray_capacity,
                     'is_top_tray': False,
+                    'tray_id': '',
+                    'status': 'new',
+                })
+                slot_no += 1
+
+            if remainder > 0:
+                slots.append({
+                    'slot_no': slot_no,
+                    'qty': remainder,
+                    'is_top_tray': True,
                     'tray_id': '',
                     'status': 'new',
                 })
@@ -3363,44 +3421,15 @@ def iqf_accept_delink_modal(request):
 
         # ── Resolve global tray capacity ──
         def _resolve_global_cap():
-            iqf_t = IQFTrayId.objects.filter(lot_id=lot_id, delink_tray=False).exclude(
-                tray_capacity__isnull=True).exclude(tray_capacity=0).first()
-            if iqf_t and iqf_t.tray_capacity and iqf_t.tray_capacity > 0:
-                return iqf_t.tray_capacity
-            brass_t = BrassTrayId.objects.filter(lot_id=lot_id, delink_tray=False).exclude(
-                tray_capacity__isnull=True).exclude(tray_capacity=0).first()
-            if brass_t and brass_t.tray_capacity and brass_t.tray_capacity > 0:
-                return brass_t.tray_capacity
-            if ts.batch_id and ts.batch_id.tray_capacity and ts.batch_id.tray_capacity > 0:
-                return ts.batch_id.tray_capacity
-            return 16
+            """Resolve reject/accept allocation capacity from the product series."""
+            return _get_series_tray_capacity(ts.batch_id)
 
         tray_capacity = _resolve_global_cap()
 
         # ── Resolve per-tray capacity (same as iqf_submit_audit) ──
         def _resolve_tray_cap(iqf_tray_obj):
-            # Handle both IQFTrayId objects and dict records from snapshots
-            if isinstance(iqf_tray_obj, dict):
-                # From snapshot: {'tray_id': ..., 'qty': ..., 'capacity': ...}
-                return iqf_tray_obj.get('capacity', tray_capacity)
-            # IQFTrayId object
-            cap = getattr(iqf_tray_obj, 'tray_capacity', None)
-            if cap and cap > 0:
-                return cap
-            brass = BrassTrayId.objects.filter(tray_id=iqf_tray_obj.tray_id).exclude(
-                tray_capacity__isnull=True).first()
-            if brass and brass.tray_capacity and brass.tray_capacity > 0:
-                return brass.tray_capacity
-            tray_master = TrayId.objects.filter(tray_id=iqf_tray_obj.tray_id).exclude(
-                tray_capacity__isnull=True).first()
-            if tray_master and tray_master.tray_capacity and tray_master.tray_capacity > 0:
-                return tray_master.tray_capacity
-            try:
-                if ts.batch_id and ts.batch_id.tray_capacity and ts.batch_id.tray_capacity > 0:
-                    return ts.batch_id.tray_capacity
-            except Exception:
-                pass
-            return 16
+            """Resolve capacity from the product series for this IQF lot."""
+            return _get_series_tray_capacity(ts.batch_id)
 
         # ── Resolve capacity for a directly-scanned reject tray ID (may be brand new, not in IQFTrayId) ──
         def _resolve_cap_for_tray_id(tid):
@@ -3508,8 +3537,14 @@ def iqf_accept_delink_modal(request):
             if rejected_qty > 0:
                 rem = rejected_qty % tray_capacity
                 full = rejected_qty // tray_capacity
-                slots = ([{'qty': rem, 'top_tray': True}] if rem > 0 else []) + \
-                        [{'qty': tray_capacity, 'top_tray': False} for _ in range(full)]
+
+                # Allocate full-capacity trays first (bottom), then the remainder (top).
+                slots = [
+                    {'qty': tray_capacity, 'top_tray': False}
+                    for _ in range(full)
+                ]
+                if rem > 0:
+                    slots.append({'qty': rem, 'top_tray': True})
                 for i, tid in enumerate(rejected_tray_id_list):
                     if i < len(slots):
                         reject_allocation.append({
@@ -3867,6 +3902,8 @@ def iqf_accept_delink_modal(request):
 
                         # Mark ALL parent trays as delinked — parent is consumed by child lots
                         IQFTrayId.objects.filter(lot_id=lot_id).update(delink_tray=True)
+                        released_count = _release_iqf_delinked_physical_trays(delinked_set)
+                        print(f'[DELINK CONFIRM NEW] Released {released_count} selected physical tray(s): {sorted(delinked_set)}')
 
                         # Update parent TotalStockModel — consumed, children carry the work
                         ts.iqf_few_cases_acceptance = True
@@ -3917,7 +3954,11 @@ def iqf_accept_delink_modal(request):
                         IQFTrayId.objects.filter(lot_id=lot_id, tray_id__in=delinked_set).update(
                             delink_tray=True
                         )
-                        print(f'[DELINK CONFIRM] Marked {len(delinked_set)} trays as delinked in IQFTrayId')
+                        released_count = _release_iqf_delinked_physical_trays(delinked_set)
+                        print(
+                            f'[DELINK CONFIRM] Marked {len(delinked_set)} trays as delinked in IQFTrayId; '
+                            f'released {released_count} selected physical tray(s)'
+                        )
 
                     # Finalize TotalStockModel flags (same as iqf_verify_trays_confirm POST)
                     ts.iqf_few_cases_acceptance = True

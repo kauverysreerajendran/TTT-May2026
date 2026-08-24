@@ -361,6 +361,11 @@ USE_TZ = True
 STATIC_URL = '/static/'
 STATICFILES_DIRS = [os.path.join(BASE_DIR, 'static')]
 
+STATICFILES_FINDERS = [
+    'django.contrib.staticfiles.finders.FileSystemFinder',
+    'watchcase_tracker.staticfiles_finders.ExcludeDRFBootstrapFinder',
+]
+
 MODEL_IMAGE_MAX_UPLOAD_SIZE = 10 * 1024 * 1024
 
 # Maximum size (bytes) accepted for an uploaded SOP PDF document.

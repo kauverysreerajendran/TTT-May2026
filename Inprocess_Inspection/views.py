@@ -24,8 +24,47 @@ import pytz
 from django.db.models import Q
 from .models import InprocessInspectionTrayCapacity
 from Jig_Loading.models import JigCompleted
+from Jig_Unloading.models import JigUnloadAfterTable, JUSubmittedZ1, JigUnloadDraft
+from Jig_Unloading.tray_utils import normalize_combine_lot_id
 from modelmasterapp.color_service import get_model_colors_by_model_no, get_or_assign_plating_color
 from modelmasterapp.type_of_input import get_type_of_input_for_batch, get_type_of_input_map
+
+
+def get_jig_source_lot_ids(jig_detail):
+    """Return primary and Add Model lot IDs represented by a JigCompleted row."""
+    lot_ids = []
+    seen = set()
+
+    def add_lot_id(value):
+        lot_id = str(value or '').strip()
+        if lot_id and lot_id not in seen:
+            seen.add(lot_id)
+            lot_ids.append(lot_id)
+
+    add_lot_id(getattr(jig_detail, 'lot_id', None))
+
+    allocation = getattr(jig_detail, 'multi_model_allocation', None) or []
+    if isinstance(allocation, str):
+        try:
+            allocation = json.loads(allocation)
+        except (TypeError, ValueError):
+            allocation = []
+
+    if isinstance(allocation, list):
+        for item in allocation:
+            if isinstance(item, dict):
+                add_lot_id(item.get('lot_id'))
+
+    return lot_ids
+
+
+def update_inprocess_stage_for_jig_lots(jig_detail):
+    """Advance every explicit source lot on a jig to Inprocess Inspection."""
+    from modelmasterapp.stage_service import update_stock_stage
+
+    for lot_id in get_jig_source_lot_ids(jig_detail):
+        update_stock_stage(lot_id, 'Inprocess Inspection')
+
 
 # Inprocess Inspection View
 class InprocessInspectionView(TemplateView):
@@ -1504,11 +1543,9 @@ class SaveBathNumberAPIView(APIView):
                 'bath_numbers', 'last_process_module', 'IP_loaded_date_time'
             ])
 
-            # Saving the bath number is the first real IP Inspection action.
-            # Update the shared stage so prior completed tables, including Jig
-            # Loading, show Inprocess Inspection and Released.
-            from modelmasterapp.stage_service import update_stock_stage
-            update_stock_stage(jig_detail.lot_id, 'Inprocess Inspection')
+            # Saving the bath number is the first real IP action; advance each
+            # explicit Add Model lot without treating the jig as one identity.
+            update_inprocess_stage_for_jig_lots(jig_detail)
             
             return Response({
                 'success': True,
@@ -1577,10 +1614,9 @@ def save_bath_number(request):
         jig_detail.save(update_fields=['bath_numbers', 'last_process_module', 'IP_loaded_date_time'])
 
         # This URL is registered first in urls.py, so it is normally the
-        # endpoint called by the page. Keep TotalStockModel.current_stage in
-        # sync with the real IP Inspection action.
-        from modelmasterapp.stage_service import update_stock_stage
-        update_stock_stage(jig_detail.lot_id, 'Inprocess Inspection')
+        # endpoint called by the page. Keep each source lot's stage in sync
+        # with the real IP Inspection action.
+        update_inprocess_stage_for_jig_lots(jig_detail)
 
         return JsonResponse({
             'success': True, 
@@ -1655,15 +1691,12 @@ def save_jig_remarks(request):
         jig_detail.remarks = remarks  # Can be empty string
         jig_detail.save(update_fields=['jig_position', 'remarks', 'IP_loaded_date_time', 'last_process_module'])
 
-        # Real processing activity — advance the shared current_stage SSOT so
-        # the previous module (Jig Loading) shows "Inprocess Inspection" as
-        # the Current Location instead of a stale value.
-        if jig_detail.lot_id:
-            try:
-                from modelmasterapp.stage_service import update_stock_stage
-                update_stock_stage(jig_detail.lot_id, 'Inprocess Inspection')
-            except Exception:
-                logging.exception('save_jig_remarks: current_stage update failed')
+        # Real processing activity: advance each source lot, not just the
+        # primary lot stored on the shared JigCompleted row.
+        try:
+            update_inprocess_stage_for_jig_lots(jig_detail)
+        except Exception:
+            logging.exception('save_jig_remarks: current_stage update failed')
 
         return JsonResponse({
             'success': True, 
@@ -1770,6 +1803,120 @@ class JigCompletedDeleteAPIView(APIView):
 class InprocessInspectionCompleteView(TemplateView):
     template_name = "Inprocess_Inspection/Inprocess_Inspection_Completed.html"
 
+    def get_live_workflow_state_maps(self, jig_details):
+        """Return the current workflow stage and status for each source lot.
+
+        ``JigCompleted`` is an Inprocess Inspection snapshot. After unloading,
+        the live workflow record is ``JigUnloadAfterTable`` and its source lot
+        IDs may be stored directly or as normalized combined IDs.
+        """
+        source_lot_ids = set()
+        jig_by_lot_id = {}
+        for jig_detail in jig_details:
+            lot_ids = [jig_detail.lot_id] + self.get_multiple_lot_ids(jig_detail)
+            for lot_id in filter(None, lot_ids):
+                source_lot_ids.add(lot_id)
+                jig_by_lot_id.setdefault(lot_id, jig_detail)
+
+        if not source_lot_ids:
+            return {}, {}, {}
+
+        stock_stage_map = dict(
+            TotalStockModel.objects.filter(lot_id__in=source_lot_ids)
+            .values_list('lot_id', 'current_stage')
+        )
+
+        # Zone 1 rows are found by the ArrayField overlap lookup. Zone 2
+        # persists prefixed combined IDs, so normalize those values in the
+        # bounded fallback before associating them with source lots.
+        after_rows = list(
+            JigUnloadAfterTable.objects.filter(
+                combine_lot_ids__overlap=list(source_lot_ids)
+            ).only('id', 'combine_lot_ids', 'current_stage', 'last_process_module')
+            .order_by('-id')
+        )
+        matched_lot_ids = {
+            normalize_combine_lot_id(combined_lot_id)
+            for after_row in after_rows
+            for combined_lot_id in (after_row.combine_lot_ids or [])
+        }
+        if source_lot_ids - matched_lot_ids:
+            after_rows.extend(
+                JigUnloadAfterTable.objects.exclude(
+                    combine_lot_ids__exact=[]
+                ).only(
+                    'id', 'combine_lot_ids', 'current_stage', 'last_process_module'
+                ).order_by('-id')
+            )
+
+        workflow_stage_map = {}
+        for after_row in after_rows:
+            stage = after_row.current_stage or after_row.last_process_module
+            if not stage:
+                continue
+            for combined_lot_id in after_row.combine_lot_ids or []:
+                lot_id = normalize_combine_lot_id(combined_lot_id)
+                if lot_id in source_lot_ids and lot_id not in workflow_stage_map:
+                    workflow_stage_map[lot_id] = stage
+
+        # A Jig Unloading record is created as soon as Zone 1 saves a model
+        # action or Zone 2 saves an unloading draft. Those are the earliest
+        # workflow signals, so do not wait for completion or stock-stage update.
+        jig_unloading_lot_ids = set(
+            JUSubmittedZ1.objects.filter(
+                lot_id__in=source_lot_ids
+            ).values_list('lot_id', flat=True)
+        )
+        zone_two_drafts = JigUnloadDraft.objects.filter(
+            Q(main_lot_id__in=source_lot_ids) |
+            Q(combined_lot_ids__overlap=list(source_lot_ids))
+        ).only('main_lot_id', 'combined_lot_ids')
+        for draft in zone_two_drafts:
+            candidate_lot_ids = [draft.main_lot_id] + list(draft.combined_lot_ids or [])
+            jig_unloading_lot_ids.update(
+                normalize_combine_lot_id(lot_id)
+                for lot_id in candidate_lot_ids
+                if normalize_combine_lot_id(lot_id) in source_lot_ids
+            )
+
+        current_stage_map = {
+            lot_id: (
+                'Jig Unloading'
+                if lot_id in jig_unloading_lot_ids
+                else workflow_stage_map.get(lot_id) or stock_stage_map.get(lot_id)
+            )
+            for lot_id in source_lot_ids
+        }
+
+        draft_lot_ids = set(
+            JUSubmittedZ1.objects.filter(
+                lot_id__in=source_lot_ids,
+                is_draft=True,
+            ).values_list('lot_id', flat=True)
+        )
+        draft_lot_ids.update(
+            JigUnloadDraft.objects.filter(
+                main_lot_id__in=source_lot_ids
+            ).values_list('main_lot_id', flat=True)
+        )
+
+        lot_status_map = {}
+        for lot_id in source_lot_ids:
+            jig_detail = jig_by_lot_id.get(lot_id)
+            if jig_detail and jig_detail.unload_hold_lot:
+                lot_status_map[lot_id] = 'Released'
+            elif lot_id in draft_lot_ids:
+                lot_status_map[lot_id] = 'Released'
+            elif jig_detail and jig_detail.unload_release_lot:
+                lot_status_map[lot_id] = 'Released'
+            elif workflow_stage_map.get(lot_id):
+                lot_status_map[lot_id] = 'Released'
+            else:
+                lot_status_map[lot_id] = 'Yet to Release'
+
+        return current_stage_map, lot_status_map, workflow_stage_map
+        
+
     def get_stock_model_data(self, lot_id):
         """
         Helper function to get stock model data from either TotalStockModel or RecoveryStockModel
@@ -1870,16 +2017,17 @@ class InprocessInspectionCompleteView(TemplateView):
         # Fetch all Bath Numbers for dropdown
         bath_numbers = BathNumbers.objects.all().order_by('bath_number')
 
-        # Bulk-fetch the live current_stage SSOT (modelmasterapp/stage_service.py) for
-        # every lot_id in this page, once, to avoid a per-row query in the loop below.
-        _all_lot_ids = list(jig_details_qs.values_list('lot_id', flat=True))
-        current_stage_map = dict(
-            TotalStockModel.objects.filter(lot_id__in=_all_lot_ids)
-            .values_list('lot_id', 'current_stage')
+        # Resolve the workflow state from the live downstream record rather than
+        # the Inprocess Inspection snapshot. This supports both unloading zones
+        # and keeps the completed table in sync with subsequent workflow actions.
+        jig_details_for_state = list(jig_details_qs)
+        current_stage_map, lot_status_map, workflow_stage_map = self.get_live_workflow_state_maps(
+            jig_details_for_state
         )
 
         # Bulk-resolve Type of Input (Fresh/Recovery). Lots living in
         # RecoveryStockModel (not TotalStockModel) are inherently Recovery.
+        _all_lot_ids = list(current_stage_map)
         type_of_input_map = get_type_of_input_map(_all_lot_ids)
         _recovery_lot_ids = RecoveryStockModel.objects.filter(
             lot_id__in=_all_lot_ids
@@ -1890,7 +2038,7 @@ class InprocessInspectionCompleteView(TemplateView):
         # Process each JigCompleted to handle multiple models and lots - SAME AS InprocessInspectionView
         processed_jig_details = []
 
-        for idx, jig_detail in enumerate(jig_details_qs):
+        for idx, jig_detail in enumerate(jig_details_for_state):
             
             # Get multiple lot_ids exactly like JigCompletedTable
             multiple_lot_ids = self.get_multiple_lot_ids(jig_detail)
@@ -1919,9 +2067,35 @@ class InprocessInspectionCompleteView(TemplateView):
             model_cases_data = self.process_model_cases_corrected(jig_detail.no_of_model_cases, multiple_lot_ids, jig_detail.batch_id)
             
             # Create enhanced jig_detail with multi-lot support
+            state_lot_ids = [jig_detail.lot_id] + multiple_lot_ids
+            # Prefer a lot whose state came from the downstream workflow record;
+            # the primary JigCompleted lot can remain an Inprocess snapshot for
+            # multi-lot jigs even after an individual source lot advances.
+            state_lot_ids = [
+                lot_id for lot_id in state_lot_ids if lot_id in workflow_stage_map
+            ] + state_lot_ids
+            current_stage = next(
+                (
+                    current_stage_map.get(lot_id)
+                    for lot_id in state_lot_ids
+                    if current_stage_map.get(lot_id)
+                ),
+                None,
+            )
+            lot_status = next(
+                (
+                    lot_status_map.get(lot_id)
+                    for lot_id in state_lot_ids
+                    if lot_status_map.get(lot_id)
+                ),
+                None,
+            )
             enhanced_jig_detail = self.create_enhanced_jig_detail(
-                jig_detail, lot_ids_data, model_cases_data,
-                current_stage=current_stage_map.get(jig_detail.lot_id)
+                jig_detail,
+                lot_ids_data,
+                model_cases_data,
+                current_stage=current_stage,
+                lot_status=lot_status,
             )
             enhanced_jig_detail.type_of_input = type_of_input_map.get(jig_detail.lot_id, 'Fresh')
 
@@ -2268,7 +2442,14 @@ class InprocessInspectionCompleteView(TemplateView):
         
         return result
 
-    def create_enhanced_jig_detail(self, original_jig_detail, lot_ids_data, model_cases_data, current_stage=None):
+    def create_enhanced_jig_detail(
+        self,
+        original_jig_detail,
+        lot_ids_data,
+        model_cases_data,
+        current_stage=None,
+        lot_status=None,
+    ):
         """
         Create enhanced jig_detail with multi-lot support and existing functionality
         EXACT SAME LOGIC AS JigCompletedTable
@@ -2297,11 +2478,7 @@ class InprocessInspectionCompleteView(TemplateView):
         # by the caller) over JigCompleted.last_process_module, which is not kept in sync
         # once the lot advances past Inprocess Inspection.
         jig_detail.last_process_module = current_stage or getattr(original_jig_detail, 'last_process_module', None)
-        jig_detail.lot_status = (
-            'Released'
-            if current_stage and current_stage != 'Inprocess Inspection'
-            else 'Yet to Release'
-        )
+        jig_detail.lot_status = lot_status or 'Yet to Release'
 
         
         
@@ -2329,6 +2506,54 @@ class InprocessInspectionCompleteView(TemplateView):
         # Add indicators for template logic
         jig_detail.has_multiple_lots = bool(jig_detail.lot_plating_stk_nos)
         jig_detail.has_multiple_models = bool(model_cases_data['model_plating_stk_nos'])
+
+        # Model Presents (circles) - SAME LOGIC AS Pick Table's create_enhanced_jig_detail.
+        # Without this, the template's is_multi_model branch never fires here because
+        # no_of_model_cases_str / enriched_multi_model_allocation were never set, so
+        # multi-model jigs fell back to the single overlapping-circle rendering.
+        models_data = model_cases_data.get('models_data', [])
+        if models_data:
+            def _circle_identity(m):
+                psn = m.get('plating_stk_no')
+                if psn and psn != 'No Plating Stock No':
+                    return psn
+                return m.get('model_name', '')
+
+            try:
+                mm = getattr(jig_detail, 'multi_model_allocation', None)
+                if mm and isinstance(mm, list):
+                    mm_parts = []
+                    for _m in mm:
+                        if isinstance(_m, dict):
+                            _name = _m.get('model_name', _m.get('model', ''))
+                            _qty = _m.get('allocated_qty', 0)
+                            if _name:
+                                mm_parts.append(f"{_name}:{_qty}")
+                    jig_detail.no_of_model_cases_str = ','.join(mm_parts) if mm_parts else ','.join([_circle_identity(m) for m in models_data if _circle_identity(m)])
+                else:
+                    jig_detail.no_of_model_cases_str = ','.join([_circle_identity(m) for m in models_data if _circle_identity(m)])
+            except Exception:
+                jig_detail.no_of_model_cases_str = ''
+        else:
+            jig_detail.no_of_model_cases_str = ''
+
+        # Enrich multi_model_allocation with plating_stk_no from ModelMasterCreation
+        try:
+            _mm = getattr(jig_detail, 'multi_model_allocation', None)
+            if _mm and isinstance(_mm, list):
+                _mm_batch_ids = [m.get('batch_id') for m in _mm if m.get('batch_id')]
+                _mmc_plating = {
+                    m.batch_id: (m.plating_stk_no or '')
+                    for m in ModelMasterCreation.objects.filter(batch_id__in=_mm_batch_ids).only('batch_id', 'plating_stk_no')
+                }
+                jig_detail.enriched_multi_model_allocation = [
+                    dict(m, plating_stk_no=_mmc_plating.get(m.get('batch_id'), ''))
+                    for m in _mm
+                ]
+            else:
+                jig_detail.enriched_multi_model_allocation = _mm or []
+        except Exception:
+            jig_detail.enriched_multi_model_allocation = getattr(jig_detail, 'multi_model_allocation', []) or []
         
         
         # Set template attributes for Inprocess Inspection table

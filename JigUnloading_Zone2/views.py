@@ -9,10 +9,12 @@ from django.db.models import OuterRef, Subquery, Exists, F, TextField, Q
 from django.db.models.functions import Cast
 from django.db.models.fields.json import KeyTextTransform
 from django.core.paginator import Paginator
+import builtins
 import math
 import json
 import logging
 import re
+import sys
 from django.utils.decorators import method_decorator
 from rest_framework.views import APIView
 from django.views.generic import TemplateView
@@ -39,6 +41,23 @@ from django.contrib.auth.mixins import LoginRequiredMixin
 from modelmasterapp.type_of_input import get_type_of_input_map, label_for_upload_type
 
 logger = logging.getLogger(__name__)
+
+
+def _zone2_safe_print(*args, **kwargs):
+    """Prevent Zone 2 debug output from breaking requests on non-UTF-8 consoles."""
+    try:
+        builtins.print(*args, **kwargs)
+    except UnicodeEncodeError:
+        stream = kwargs.get('file') or sys.stdout
+        encoding = getattr(stream, 'encoding', None) or 'utf-8'
+        safe_args = [
+            str(arg).encode(encoding, errors='replace').decode(encoding)
+            for arg in args
+        ]
+        builtins.print(*safe_args, **kwargs)
+
+
+print = _zone2_safe_print
 
 
 def _zone2_ordered_unique(values):
@@ -1807,6 +1826,30 @@ class JU_Zone_MainTable(LoginRequiredMixin, TemplateView):
                     all_submitted_lot_ids.add(submission.lot_id)
 
         print(f"[ZONE2 FILTER] Submitted source lot_ids to hide: {len(all_submitted_lot_ids)}")
+
+        # ------------------------------------------------------------------
+        # DRAFT VISIBILITY OVERRIDE (DISPLAY ONLY)
+        # ------------------------------------------------------------------
+        # Zone 2 filters this queryset BEFORE check_draft_status_for_jigs()
+        # runs.  Therefore a jig that still has an active unload draft can be
+        # removed by the normal "fully unloaded" checks before the UI gets
+        # a chance to mark it as Draft.
+        #
+        # Keep the existing loaded/already-loaded/submission concepts intact.
+        # This set is used ONLY to prevent an active draft row from disappearing
+        # from the Zone 2 pick table.  Final-completed lots are still handled by
+        # the existing completion checks below.
+        draft_jig_completed_ids = set(
+            JUSubmittedZ1.objects.filter(is_draft=True)
+            .values_list('jig_completed_id', flat=True)
+        )
+        draft_lot_ids = set(
+            JigUnloadDraft.objects.values_list('main_lot_id', flat=True)
+        )
+        print(
+            f"[ZONE2 FILTER] Active draft JigCompleted IDs: {len(draft_jig_completed_ids)}; "
+            f"legacy draft lot_ids: {len(draft_lot_ids)}"
+        )
         
         # Also check direct unloads
         direct_unloads = set(JigUnload_TrayId.objects.values_list('lot_id', flat=True))
@@ -1866,11 +1909,36 @@ class JU_Zone_MainTable(LoginRequiredMixin, TemplateView):
                 print(f"🚫 [ZONE2 FAST PATH] Hiding - all lot_ids unloaded: {jig.lot_id}")
                 continue
 
-            # Fallback: combine_lot_ids scan
+            # IMPORTANT: the row is already past the final-completion checks.
+            # If an unload draft belongs to this JigCompleted (or to one of the
+            # lot_ids represented by this row), keep the row visible so the user
+            # can resume it.  This does NOT change is_already_loaded_z1,
+            # is_merged_additional, Add Model, or any final-submission behavior.
+            has_active_draft = (
+                getattr(jig, 'id', None) in draft_jig_completed_ids
+                or bool(jig_lot_ids & draft_lot_ids)
+            )
+            if has_active_draft:
+                print(
+                    f"✅ [ZONE2 DRAFT VISIBILITY] Keeping jig visible for active draft: "
+                    f"jig_id={getattr(jig, 'jig_id', '')}, lot_ids={sorted(jig_lot_ids)}"
+                )
+                filtered_jigs.append(jig)
+                continue
+
+            # Fallback: use only records that represent an actual/final unload.
+            # A JUSubmittedZ1 record with is_draft=False is the model-level
+            # "Save & Back" state used by the working Zone 1 flow.  It must NOT
+            # by itself remove the JIG from the Zone 2 pick table.  The JIG is
+            # hidden only when the final-completion state is reached
+            # (last_process_module='Jig Unloading') or an actual unload record
+            # exists in JigUnloadAfterTable/JigUnload_TrayId.
+            #
+            # This is intentionally NOT an Already Loaded change.
+            # is_merged_additional / is_already_loaded_z1 remain untouched.
             unloaded_lot_ids = (
                 unload_map.get(jig.jig_id, set())
                 | (jig_lot_ids & bare_unloaded_lot_ids)
-                | (jig_lot_ids & all_submitted_lot_ids)
             )
             
             # Keep jig if ANY lot_id is NOT unloaded
@@ -4649,6 +4717,55 @@ class JU_Zone_Completedtable(LoginRequiredMixin, TemplateView):
                         'first_image': "/static/assets/images/imagePlaceholder.jpg"
                     }
 
+        # Detect Nickel Inspection activity in bulk. Zone 2 shares the Nickel
+        # workflow tables and unload-row activity flags with Zone 1, so these
+        # records are the earliest reliable signal that the lot has left Jig
+        # Unloading.
+        from Nickel_Inspection.models import (
+            NickelQcTrayId,
+            Nickel_QC_AutoSave,
+            Nickel_QC_Draft_Store,
+            Nickel_QC_TopTray_Draft_Store,
+            NickelQC_Submission,
+        )
+
+        completed_unload_lot_ids = [
+            unload.lot_id for unload in completed_unloads if unload.lot_id
+        ]
+        nickel_wiping_lot_ids = set(
+            NickelQcTrayId.objects.filter(
+                lot_id__in=completed_unload_lot_ids
+            ).values_list('lot_id', flat=True)
+        )
+        for activity_model in (
+            Nickel_QC_AutoSave,
+            Nickel_QC_Draft_Store,
+            Nickel_QC_TopTray_Draft_Store,
+            NickelQC_Submission,
+        ):
+            nickel_wiping_lot_ids.update(
+                activity_model.objects.filter(
+                    lot_id__in=completed_unload_lot_ids
+                ).values_list('lot_id', flat=True)
+            )
+
+        nickel_activity_fields = (
+            'nq_draft',
+            'nq_onhold_picking',
+            'nq_hold_lot',
+            'nq_release_lot',
+            'nq_qc_accptance',
+            'nq_qc_rejection',
+            'nq_qc_few_cases_accptance',
+            'nq_accepted_tray_scan_status',
+            'nq_rejection_tray_scan_status',
+        )
+        nickel_wiping_lot_ids.update(
+            unload.lot_id
+            for unload in completed_unloads
+            if any(getattr(unload, field, False) for field in nickel_activity_fields)
+        )
+
         # ✅ ENHANCED: Process each unload record using saved list fields (mirroring Zone 1)
         table_data = []
         for idx, unload in enumerate(completed_unloads):
@@ -4986,7 +5103,11 @@ class JU_Zone_Completedtable(LoginRequiredMixin, TemplateView):
                 # Prefer the live current_stage SSOT (modelmasterapp/stage_service.py) so
                 # this stays in sync with downstream modules (e.g. Spider Spindle) that
                 # only update current_stage and not last_process_module.
-                'last_process_module': unload.current_stage or unload.last_process_module,
+                'last_process_module': (
+                    'Nickel Wiping'
+                    if unload.lot_id in nickel_wiping_lot_ids
+                    else unload.current_stage or unload.last_process_module
+                ),
                 'created_at': unload.created_at,
                 'un_loaded_date_time': unload.Un_loaded_date_time,
                 'Un_loaded_date_time': unload.Un_loaded_date_time,

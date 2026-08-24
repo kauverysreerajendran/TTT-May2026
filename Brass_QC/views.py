@@ -1,4 +1,4 @@
-﻿from rest_framework.views import APIView
+from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.renderers import TemplateHTMLRenderer
 from django.shortcuts import render
@@ -46,6 +46,7 @@ from .services.selectors import (
     get_rejection_reasons_qs,
     get_completed_submission,
     get_submission_by_child_lot,
+    get_brass_qc_submitted_detail,
 )
 from .services.tray_service import (
     resolve_lot_trays,
@@ -118,17 +119,6 @@ class BrassPickTableView(APIView):
         master_data = []
         for stock_obj in page_obj.object_list:
             batch = stock_obj.batch_id
-            
-            current_stage_display = (
-                stock_obj.current_stage
-                or _compute_brass_qc_display_stage(stock_obj)
-            )
-
-            lot_status = (
-                'Released'
-                if current_stage_display != 'Brass QC'
-                else 'Yet to Release'
-            )
             data = {
                 'batch_id': batch.batch_id,
                 'lot_id': stock_obj.lot_id,
@@ -182,6 +172,7 @@ class BrassPickTableView(APIView):
                 'polishing_stk_no': batch.polishing_stk_no,
                 'category': batch.category,
                 'last_process_module': stock_obj.last_process_module,
+                'current_stage': stock_obj.current_stage,
                 'type_of_input': get_type_of_input_for_batch(batch),
             }
             master_data.append(data)
@@ -229,7 +220,7 @@ class BrassPickTableView(APIView):
             else:
                 data['no_of_trays'] = 0
             
-            if data.get('send_brass_qc'):
+            if data.get('send_brass_qc') or data.get('send_brass_audit_to_qc'):
                 data['brass_qc_rejection'] = False
                 data['brass_physical_qty'] = 0
                 data['brass_rejection_total_qty'] = 0
@@ -274,13 +265,21 @@ class BrassPickTableView(APIView):
             data['available_qty'] = data.get('brass_qc_accepted_qty') if data.get('brass_qc_accepted_qty') and data.get('brass_qc_accepted_qty') > 0 else (data.get('brass_physical_qty') if data.get('brass_physical_qty') and data.get('brass_physical_qty') > 0 else data.get('display_accepted_qty', 0))
 
             # ── Backend-computed flags — move ALL decision logic here ──
-            # Delete button: only when lot has no acceptance/rejection yet and qty is verified
+            # Delete button: only when the lot is still an unprocessed Brass QC
+            # pick.  A completed BQC submission is permanent history and must keep
+            # the lot registered in the Brass QC Completed Table, even if routing
+            # to Brass Audit/IQF later clears the current pick-table flags.
+            data['has_completed_bqc_submission'] = Brass_QC_Submission.objects.filter(
+                lot_id=lot_id,
+                is_completed=True,
+            ).exists()
             data['can_delete'] = (
                 not data.get('brass_qc_accptance') and
                 not data.get('brass_qc_rejection') and
                 not data.get('brass_accepted_tray_scan_status') and
                 not data.get('brass_qc_few_cases_accptance') and
-                data.get('brass_qc_accepted_qty_verified', False)
+                data.get('brass_qc_accepted_qty_verified', False) and
+                not data['has_completed_bqc_submission']
             )
 
             # QC circle status: determines background color
@@ -317,7 +316,21 @@ class BrassPickTableView(APIView):
             elif data.get('brass_qc_accepted_qty_verified'):
                 data['lot_status'] = 'Yet to Release'
             else:
-                data['lot_status'] = 'Yet to Start'
+                qc_completed = any((
+                    data.get('brass_qc_rejection'),
+                    data.get('brass_qc_few_cases_accptance'),
+                    data.get('brass_qc_accptance'),
+                ))
+                if qc_completed and data.get('current_stage') not in (None, '', 'Brass QC'):
+                    data['lot_status'] = 'Released'
+                elif qc_completed:
+                    data['lot_status'] = 'Yet to Release'
+                elif data.get('brass_qc_accepted_qty_verified'):
+                    # Persisted checkbox state: the lot has been picked and
+                    # remains in Brass QC until a submission is completed.
+                    data['lot_status'] = 'In Progress'
+                else:
+                    data['lot_status'] = 'Yet to Start'
 
         context = {
             'master_data': master_data,
@@ -511,6 +524,7 @@ class BrassCompletedView(APIView):
                 'tray_capacity': batch.tray_capacity,
                 'stock_lot_id': stock_obj.lot_id,
                 'last_process_module': stock_obj.last_process_module,
+                'current_stage': stock_obj.current_stage,
                 # Same stale-vs-child-progress resolution as current_stage_display above —
                 # this is the field the template actually renders as "Current Stage".
                 'next_process_module': current_stage_display,
@@ -602,6 +616,33 @@ class BrassCompletedView(APIView):
         return Response(context, template_name=self.template_name)
 
 
+class BrassQCSubmittedDetailAPI(APIView):
+    """GET: Return read-only Brass QC completed-history detail for a lot."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        lot_id = (request.GET.get("lot_id") or "").strip()
+        if not lot_id:
+            return Response(
+                {"success": False, "error": "lot_id is required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            payload = get_brass_qc_submitted_detail(lot_id)
+        except Exception:
+            logger.exception("[BQC][submitted_detail] Unexpected error for lot=%s", lot_id)
+            return Response(
+                {"success": False, "error": "Unable to load Brass QC completed history."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+        if not payload.get("success"):
+            return Response(payload, status=status.HTTP_404_NOT_FOUND)
+        return Response(payload)
+
+
 import logging
 logger = logging.getLogger(__name__)
 
@@ -646,18 +687,26 @@ def brass_qc_toggle_verified(request):
     logger.info(f"[BrassQC] Toggle verified: lot_id={lot_id}, verified={ts.brass_qc_accepted_qty_verified}")
 
     # ── Bin icon activation rule (mirrors BrassPickTableView.can_delete) ──
+    # A completed BQC submission permanently registers the lot in the
+    # Brass QC Completed Table, so it is never eligible for deletion.
+    has_completed_bqc_submission = Brass_QC_Submission.objects.filter(
+        lot_id=lot_id,
+        is_completed=True,
+    ).exists()
     can_delete = (
         not ts.brass_qc_accptance and
         not ts.brass_qc_rejection and
         not ts.brass_accepted_tray_scan_status and
         not ts.brass_qc_few_cases_accptance and
-        ts.brass_qc_accepted_qty_verified
+        ts.brass_qc_accepted_qty_verified and
+        not has_completed_bqc_submission
     )
 
     return JsonResponse({
         "success": True,
         "lot_id": lot_id,
         "brass_qc_accepted_qty_verified": ts.brass_qc_accepted_qty_verified,
+        "lot_status": "In Progress" if ts.brass_qc_accepted_qty_verified else "Yet to Start",
         "last_process_module": ts.last_process_module,
         "can_delete": can_delete,
     })
@@ -689,14 +738,35 @@ def brass_qc_delete_batch(request):
     if not ts:
         return JsonResponse({"success": False, "error": "Lot not found"}, status=404)
 
+    # A lot that has already been processed/submitted by Brass QC must never be
+    # deleted from TotalStockModel, even if the processing flags were cleared
+    # while routing it to Brass Audit or IQF.  Those flags describe the current
+    # pick-table state; the completed submission is the permanent BQC history
+    # that keeps the lot registered in the Brass QC Completed Table.
+    has_completed_bqc_submission = Brass_QC_Submission.objects.filter(
+        lot_id=lot_id,
+        is_completed=True,
+    ).exists()
+
     can_delete = (
         not ts.brass_qc_accptance and
         not ts.brass_qc_rejection and
         not ts.brass_accepted_tray_scan_status and
         not ts.brass_qc_few_cases_accptance and
-        ts.brass_qc_accepted_qty_verified
+        ts.brass_qc_accepted_qty_verified and
+        not has_completed_bqc_submission
     )
     if not can_delete:
+        if has_completed_bqc_submission:
+            logger.warning(
+                "Brass QC Delete Batch blocked: lot_id=%s already has a completed BQC submission; "
+                "lot must remain registered in Brass QC Completed Table.",
+                lot_id,
+            )
+            return JsonResponse({
+                "success": False,
+                "error": "This lot has already been processed by Brass QC and cannot be deleted.",
+            }, status=409)
         return JsonResponse({"success": False, "error": "This lot can no longer be deleted."}, status=409)
 
     with transaction.atomic():
@@ -1023,9 +1093,15 @@ def brass_qc_action(request):
             if tid:
                 reject_qty_map[tid] = int(t.get("qty") or 0)
 
-        # Build delinked trays only from explicit Brass QC delink state.
-        # Do not infer delinks from "original minus accepted/rejected" because that can
-        # pull Input Screening history into the Brass QC completed view.
+        # Build completed-table delink history from the immutable submission
+        # snapshot first. submission_service.handle_submission() stores the exact
+        # physical tray IDs selected with PROCESS -> DELINK in
+        # snapshot_data["delinked"] before those trays are released for reuse.
+        #
+        # This is intentionally preferred over the live TrayId/BrassTrayId tables:
+        # once a tray is released its lot_id can be cleared and the same physical
+        # tray can later be reused by another lot, so live occupancy is not a
+        # reliable historical source for the Completed eye-icon modal.
         parent_lot_id = submission.lot_id if (is_child_accept or is_child_reject) else lot_id
         consumed_tray_ids = {
             str(tid or "").strip().upper()
@@ -1052,19 +1128,31 @@ def brass_qc_action(request):
                 "is_top_tray": False,
             })
 
-        for bt in BrassTrayId.objects.filter(
-            lot_id=parent_lot_id,
-            delink_tray=True,
-            rejected_tray=False,
-        ).order_by('id'):
-            _add_delink_tray(bt.tray_id, bt.tray_quantity)
+        # Authoritative history for new submissions.
+        _snapshot_data = submission.snapshot_data or {}
+        _snapshot_delinked = (
+            _snapshot_data.get("delinked", [])
+            if isinstance(_snapshot_data, dict)
+            else []
+        )
+        for _tid in (_snapshot_delinked or []):
+            # A submitted DELINK means the physical tray became empty/reusable.
+            _add_delink_tray(_tid, 0)
 
-        for ti in TrayId.objects.filter(
-            lot_id=parent_lot_id,
-            delink_tray=True,
-            rejected_tray=False,
-        ).order_by('id'):
-            _add_delink_tray(ti.tray_id, ti.tray_quantity)
+        # Legacy fallback only: older submissions may predate snapshot_data["delinked"].
+        # Do not run this fallback when the snapshot already contains delink history.
+        if not _snapshot_delinked:
+            for bt in BrassTrayId.objects.filter(
+                lot_id=parent_lot_id,
+                delink_tray=True,
+            ).order_by('id'):
+                _add_delink_tray(bt.tray_id, 0)
+
+            for ti in TrayId.objects.filter(
+                lot_id=parent_lot_id,
+                delink_tray=True,
+            ).order_by('id'):
+                _add_delink_tray(ti.tray_id, 0)
 
         for tid, qty in accept_qty_map.items():
             trays.append({
