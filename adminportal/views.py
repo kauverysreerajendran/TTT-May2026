@@ -463,34 +463,7 @@ class TimedLoginView(__import__('django.contrib.auth.views', fromlist=['LoginVie
         is_valid = form.is_valid()  # runs authenticate() + password verify
         timers['form_is_valid'] = (_time.time() - t0) * 1000
 
-        session_conflict_message = None
         if is_valid:
-            from .services import get_active_session_conflict_message
-            current_session_key = getattr(request.session, 'session_key', None)
-            session_conflict_message = get_active_session_conflict_message(
-                form.get_user(), current_session_key, request=request,
-            )
-
-        if is_valid and session_conflict_message:
-            response = self.form_invalid(form)
-            if hasattr(response, 'context_data'):
-                response.context_data['error'] = session_conflict_message
-            self._refresh_captcha_context_after_failed_login(response, username)
-            security_logger = logging.getLogger('security.auth')
-            security_logger.warning(
-                'LOGIN_BLOCKED_ACTIVE_SESSION_ELSEWHERE: user=%s', username,
-            )
-            _emit_auth_event(
-                request,
-                'AUTH.LOGIN.BLOCKED',
-                'WARNING',
-                'Login attempt blocked: account already active on another device',
-                {
-                    'username_hash': _perf_username(username),
-                    'duration_ms': round((perf_time.perf_counter() - login_start) * 1000, 3),
-                },
-            )
-        elif is_valid:
             t0 = _time.time()
             response = self.form_valid(form)
             timers['form_valid_otp'] = (_time.time() - t0) * 1000
