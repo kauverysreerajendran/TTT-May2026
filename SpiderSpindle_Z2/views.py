@@ -325,6 +325,9 @@ class SSZ2CompletedView(APIView):
 
 class SSZ2AddSpiderAPIView(APIView):
     """Add Spider: auto-fetch all trays from upstream, link them, mark completed."""
+    # Terminal action for Z2 — pulls trays via the upstream cascade (Nickel Audit Z2 →
+    # Nickel Inspection → Nickel Audit → Jig Unload → IP verification) since
+    # JigUnloadAfterTable itself holds no tray records, then frees those trays for reuse.
 
     def post(self, request):
         lot_id = request.data.get('lot_id')
