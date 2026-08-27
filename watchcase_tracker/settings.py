@@ -12,7 +12,23 @@ https://docs.djangoproject.com/en/5.1/ref/settings/
 
 from pathlib import Path
 import os
+import sys
 from dotenv import load_dotenv
+
+# ---------------------------------------------------------------------------
+# Console encoding safety.
+# On Windows / IIS (wfastcgi) the stdout/stderr streams default to the legacy
+# cp1252 codec. Any diagnostic print() containing non-ASCII characters (e.g.
+# status emojis used across several views) then raises UnicodeEncodeError,
+# which surfaces to the client as an HTTP 500 with an HTML error page.
+# Force UTF-8 with a safe error handler so those writes can never crash a
+# request. Guarded because some hosting stdout objects lack reconfigure().
+# ---------------------------------------------------------------------------
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding='utf-8', errors='backslashreplace')
+    except (AttributeError, ValueError):
+        pass
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
