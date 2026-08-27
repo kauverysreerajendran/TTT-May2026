@@ -4245,6 +4245,7 @@ class JU_Zone_ListAPIView(APIView):
         if not lot_id:
             return JsonResponse({'success': False, 'error': 'Missing lot_id'}, status=400)
 
+        # Primary source: trays saved directly under this UNLOT id
         trays = JigUnload_TrayId.objects.filter(lot_id=lot_id).order_by('id')
         tray_list = [
             {
@@ -4254,6 +4255,38 @@ class JU_Zone_ListAPIView(APIView):
             }
             for tray in trays
         ]
+
+        # Fallback 1: some records were saved under their original (pre-merge)
+        # source lot_ids instead of the UNLOT id — look those up via combine_lot_ids.
+        if not tray_list:
+            record = JigUnloadAfterTable.objects.filter(lot_id=lot_id).only('combine_lot_ids').first()
+            combine_lot_ids = record.combine_lot_ids if record else []
+            if combine_lot_ids:
+                candidate_ids = set(combine_lot_ids)
+                candidate_ids.update(normalize_combine_lot_id(cid) for cid in combine_lot_ids)
+                trays = JigUnload_TrayId.objects.filter(lot_id__in=candidate_ids).order_by('id')
+                tray_list = [
+                    {
+                        'tray_id': tray.tray_id,
+                        'tray_quantity': tray.tray_qty,
+                        'top_tray': tray.top_tray
+                    }
+                    for tray in trays
+                ]
+
+        # Fallback 2: the master TrayId table is updated with the same lot_id at
+        # unload-save time, so it still reflects tray↔lot ownership even if
+        # JigUnload_TrayId was never written for this record.
+        if not tray_list:
+            master_trays = TrayId.objects.filter(lot_id=lot_id).order_by('id')
+            tray_list = [
+                {
+                    'tray_id': tray.tray_id,
+                    'tray_quantity': tray.tray_quantity,
+                    'top_tray': tray.top_tray
+                }
+                for tray in master_trays
+            ]
 
         return JsonResponse({
             'success': True,

@@ -1323,16 +1323,16 @@ body.add-model-mode #selectAllCheckbox {
           <div class="calendar-bar">
             <div class="date-input-group">
               <label for="from-date-simple" style="font-weight: 600; color: #028084; margin-right: 8px;">From Date:</label>
-              <input type="date" id="from-date-simple" name="from_date" 
-                     value="{{ from_date }}" 
+              <input type="date" id="from-date-simple" name="from_date"
+                     value="{{ from_date|date:'Y-m-d' }}"
                      max="{{ 'now'|date:'Y-m-d' }}"
                      style="border: 1.5px solid #028084; border-radius: 6px; padding: 6px 12px; font-size: 14px; color: #028084; font-weight: 600;">
             </div>
             
             <div class="date-input-group">
               <label for="to-date-simple" style="font-weight: 600; color: #028084; margin-right: 8px;">To Date:</label>
-              <input type="date" id="to-date-simple" name="to_date" 
-                     value="{{ to_date }}" 
+              <input type="date" id="to-date-simple" name="to_date"
+                     value="{{ to_date|date:'Y-m-d' }}"
                      max="{{ 'now'|date:'Y-m-d' }}"
                      style="border: 1.5px solid #028084; border-radius: 6px; padding: 6px 12px; font-size: 14px; color: #028084; font-weight: 600;">
             </div>
@@ -1350,8 +1350,8 @@ body.add-model-mode #selectAllCheckbox {
         </div>
           </div>
 
-          <input type="hidden" id="from-date" value="{{ from_date }}" />
-          <input type="hidden" id="to-date" value="{{ to_date }}" />
+          <input type="hidden" id="from-date" value="{{ from_date|date:'Y-m-d' }}" />
+          <input type="hidden" id="to-date" value="{{ to_date|date:'Y-m-d' }}" />
           <!-- 🔥 END: Date Filter Section -->
 
             <!-- Table Section -->
@@ -1884,7 +1884,11 @@ document.addEventListener("DOMContentLoaded", function () {
 
   function getUnloadPreviewEntryUrl(entry) {
     if (!entry) return "";
-    return normalizeUnloadModalImageUrl(entry.preview_image || entry.image_url || entry.url || entry.src || entry.image || "");
+    if (typeof entry === "string") return normalizeUnloadModalImageUrl(entry);
+    if (typeof entry !== "object") return "";
+    return normalizeUnloadModalImageUrl(
+      entry.preview_image || entry.image_url || entry.url || entry.src || entry.image || entry.first_image || ""
+    );
   }
 
   function resolveUnloadPreviewImage(payload) {
@@ -1920,7 +1924,7 @@ document.addEventListener("DOMContentLoaded", function () {
     } catch (error) {
       legacyImages = [];
     }
-    const legacyUrl = normalizeUnloadModalImageUrl(legacyImages[0]);
+    const legacyUrl = getUnloadPreviewEntryUrl(legacyImages[0]);
     if (legacyUrl) {
       imagesDiv.innerHTML = `<img src="${legacyUrl}" alt="Model image" style="border-radius:50%;width:50px;height:50px;object-fit:contain;border:1px solid #eee;margin-right:2px;" />`;
     }
@@ -2007,13 +2011,18 @@ document.addEventListener("DOMContentLoaded", function () {
       let traysData = [];
       try {
         const params = new URLSearchParams({ lot_id: lotId });
-        const resp = await fetch(`/jig_unloading/jig_unload_view_tray_list/?${params}`);
+        const resp = await fetch(`/JigUnloading_Zone2/JU_Zone_view_tray_list/?${params}`);
         const result = await resp.json();
-        
+
         console.log("📡 Tray data API response:", result);
-        
+
         if (result.success) {
-          traysData = result.trays || [];
+          traysData = (result.trays || []).map((t) => ({
+            tray_id: t.tray_id,
+            tray_quantity: (t.tray_quantity !== undefined && t.tray_quantity !== null) ? t.tray_quantity : (t.tray_qty ?? 0),
+            top_tray: (t.top_tray !== undefined) ? t.top_tray : (t.is_top_tray ?? false),
+            source_jig: t.source_jig || null,
+          }));
           console.log("✅ Tray data loaded:", traysData.length, "trays");
         } else {
           console.error('❌ API Error:', result.error || 'Unknown error');
